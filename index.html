@@ -33,6 +33,7 @@
     <section class="camera-card">
       <div class="video-wrap">
         <video id="camera" autoplay muted playsinline></video>
+        <canvas id="detectionOverlay" class="detection-overlay"></canvas>
         <div id="regionGuide" class="region-guide" hidden><span>Fill this box with the item</span></div>
         <div id="cameraMessage" class="overlay">Tap “Test camera only” or “Start camera &amp; model”</div>
       </div>
@@ -66,8 +67,9 @@
                 <option value="full">Whole frame</option>
               </select>
             </label>
-            <p class="help">Only the area inside the dashed box is classified. The item should fill most of it:
-              a blank background (table, wall) is usually classified as cardboard or paper.</p>
+            <p class="help">Used when detection is off, or when nothing is detected and the fallback is “centre region”.
+              Only the area inside the dashed box is classified, so the item should fill most of it: a blank background
+              (table, wall) is usually classified as cardboard or paper.</p>
             <label>Classify a photo instead of live video
               <input id="photoInput" type="file" accept="image/*">
             </label>
@@ -82,7 +84,27 @@
 
     <section class="panel">
       <h2>Classifier configuration</h2>
-      <label>Model source
+      <label>Pipeline
+        <select id="pipeline">
+          <option value="hybrid" selected>Detect the object, then classify its material (recommended)</option>
+          <option value="classify">Classify a fixed region only (no detection)</option>
+        </select>
+      </label>
+      <div id="detectionFields" class="source-fields">
+        <p class="help">Stage 1: <strong>COCO-SSD</strong> (Apache-2.0, 9&nbsp;MB) finds everyday objects such as bottles, cups,
+          fruit and books, and ignores people and furniture. Stage 2: the largest object is cropped and its material is
+          classified by the model below. Items COCO does not know (crumpled paper, boxes, cans, batteries) may not be detected.</p>
+        <div class="grid two">
+          <label>Minimum detection score <input id="detScore" type="number" min="0.1" max="0.95" step="0.05" value="0.4"></label>
+          <label>When nothing is detected
+            <select id="fallback">
+              <option value="none" selected>Report “No item” (publish nothing)</option>
+              <option value="centre">Classify the centre region instead</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <label>Material classifier (model source)
         <select id="modelSource">
           <option value="default" selected>Default: EcoVision MobileNetV3 (bundled, 10 classes)</option>
           <option value="lite">Lite: TrashNet MobileNetV2 (bundled, fastest, less accurate)</option>
@@ -189,6 +211,7 @@
         <dl>
           <div><dt>Model</dt><dd id="modelStatus">Not loaded</dd></div>
           <div><dt>Backend</dt><dd id="backendStatus">—</dd></div>
+          <div><dt>Detected object</dt><dd id="detectedStatus">—</dd></div>
           <div><dt>Camera</dt><dd id="cameraStatus">Stopped</dd></div>
           <div><dt>MQTT</dt><dd id="mqttStatus">Disconnected</dd></div>
           <div><dt>Subscribed</dt><dd id="subscribedStatus">—</dd></div>
@@ -207,6 +230,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/tf-backend-wasm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
   <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
   <script src="app.js"></script>

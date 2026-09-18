@@ -1,6 +1,6 @@
 # Week 4 Android tablet waste classifier
 
-This is a no-build browser application for demonstrating on-device image classification and MQTT publication on an old Android tablet. Classification runs in the browser with TensorFlow.js and a Teachable Machine image model. The sample publishes labels, confidence and timing metadata; it does not publish camera images.
+This is a no-build browser application for demonstrating on-device object detection, image classification and MQTT publication on an old Android tablet. Everything runs in the browser with TensorFlow.js. The sample publishes labels, confidence and timing metadata; it does not publish camera images.
 
 ## What students learn
 
@@ -10,7 +10,20 @@ This is a no-build browser application for demonstrating on-device image classif
 4. Publish a structured JSON result over MQTT WebSockets.
 5. Observe reconnect state, message timing and old-device performance.
 
-## Bundled models
+## How it works: detect, then classify
+
+By default the app uses a two-stage pipeline (*Pipeline* under *Classifier configuration*):
+
+1. **Detect.** [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd) (lite MobileNetV2, Apache-2.0, `models/coco-ssd-lite/`, 9 MB) finds everyday objects in the camera frame, such as bottles, cups, fruit and books, and draws a box around each one. People (for example, the hand holding the item) and background furniture are ignored.
+2. **Crop.** The largest remaining object is cut out as a square with a little padding.
+3. **Classify.** The material classifier (below) classifies only that crop, so the background no longer influences the result.
+4. **No object, no message.** If nothing is detected, the app shows **No item** and publishes nothing. This replaces the missing `unknown` class.
+
+Trade-off to discuss with students: COCO-SSD only knows 80 everyday object classes. It detects bottles, cups, bowls, fruit, books and similar items well, but it has no class for cans, boxes, crumpled paper or batteries. For those, set *When nothing is detected* to **Classify the centre region instead**. The message then records `"pipeline": "fallback"` so the consumer knows no object was located. Choosing *Classify a fixed region only* switches detection off completely.
+
+The detector's weights were stored as float16 with `tools/quantize_tfjs_fp16.py`, halving the download from 18 MB. Its boxes and scores match the original float32 model to within 0.003.
+
+## Bundled material classifiers
 
 The app ships with two waste classifiers, so it works without training anything first. Choose one under *Model source*.
 
@@ -31,18 +44,18 @@ The app ships with two waste classifiers, so it works without training anything 
 
 Limitations to discuss with students:
 
-- Neither model has an `unknown`/`empty` class, so an empty scene is still forced into a waste class. The confidence threshold and stable-frame rules reduce, but do not remove, false publications.
+- Neither classifier has an `unknown`/`empty` class. With detection on, an empty scene gives *No item*. With detection off or in fallback mode, an empty scene is still forced into a waste class, usually `cardboard`.
 - EcoVision's reported 95% comes from Kaggle datasets that overlap. Expect lower accuracy on your own tablet camera, lighting and backgrounds; measuring this is a good tutorial exercise.
 - The classes describe materials, not local bins. Map them to your council's bin categories in the MQTT consumer, or train a Teachable Machine model on your own items and bins.
 - Check the **Inference** time on your tablet. If EcoVision is too slow, raise the stable-frame count or switch to Lite.
 
 ## Troubleshooting: "everything is cardboard or paper"
 
-Both bundled models answer `cardboard` or `paper` when they see little except background. This happens with a black, grey or white frame, a plain wall or table, or random noise. If every item gets these labels, the model is not seeing the item. Work through the panel **What the model sees & diagnostics**:
+With detection on, this should be rare, because the classifier only sees the detected object. With detection off or in fallback mode, both bundled models answer `cardboard` or `paper` when they see little except background. This happens with a black, grey or white frame, a plain wall or table, or random noise. If every item gets these labels, the model is not seeing the item. Work through the panel **What the model sees & diagnostics**:
 
 1. **Check the preview thumbnail.** It shows exactly what the model receives. If it is black or blank, the camera frames are not reaching the model. *Brightness* and *Contrast* are shown under it; contrast below about 8 means a blank frame, and the log warns about this.
 2. **Fill the dashed box with the item.** Only the area inside the box is classified. In testing, a bottle occupying about a third of the frame on a plain table was classified as `paper` (whole frame or centre square) but as `plastic` at 99.9% with *zoom 2×*.
-3. **Run the model self-test.** It classifies three reference photos and compares every probability with known-good results. If it fails, the phone's GPU is computing wrong results: choose **WebAssembly** under *Compute backend* and test again.
+3. **Run the model self-test.** It runs the detector and classifier on reference photos and compares the results with known-good values. If it fails, the phone's GPU is computing wrong results: choose **WebAssembly** under *Compute backend* and test again.
 4. **Classify a photo.** Take a photo with the phone's camera app and select it. If photos work but live video does not, the problem is in the camera stream rather than the model.
 
 The *Backend* row in *System state* shows the compute backend, GPU name and whether the GPU supports 32-bit or only 16-bit floats.
@@ -80,13 +93,19 @@ The page must be served over HTTPS for camera access. Opening `index.html` direc
   "sequence": 7,
   "timestamp": "2026-09-18T03:20:10.250Z",
   "source": "camera",
-  "classification": "recycled",
+  "pipeline": "detect",
+  "classification": "plastic",
   "confidence": 0.9341,
+  "detected_object": {"label": "bottle", "confidence": 0.8942, "bbox": [0.1623, 0.1303, 0.7769, 0.5803]},
   "inference_ms": 186,
-  "model_url": "https://teachablemachine.withgoogle.com/models/MODEL_ID/",
-  "alternatives": [{"label":"landfill","confidence":0.0412}]
+  "model_url": "bundled:ecovision-mobilenetv3-large",
+  "alternatives": [{"label":"glass","confidence":0.0412}]
 }
 ```
+
+- `pipeline`: `detect` (object detected, then classified), `fallback` (nothing detected; the centre region was classified), or `classify` (detection switched off).
+- `classification` and `confidence` come from the material classifier.
+- `detected_object` is `null` unless an object was detected. `bbox` is `[x, y, width, height]` as fractions (0–1) of the camera frame.
 
 ## Stability mechanism
 
@@ -101,7 +120,8 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 ## Important Android notes
 
 - Camera access normally requires HTTPS and user permission.
-- The app requests 640 x 480 and limits inference to approximately four runs per second to reduce load.
+- The app requests 640 x 480 and limits inference to approximately four runs per second to reduce load. Detection plus classification is roughly twice the work of classification alone; check the *Inference* time on your tablet.
+- The first start on an old tablet can take several seconds while both models are prepared for the GPU; the status shows *Loading models…*.
 - Older tablets may terminate the tab when memory is low. Close other tabs and lower camera resolution or inference frequency if needed.
 - Keep the screen awake during demonstrations; browser background tabs are throttled.
 - Internet access is needed for the CDN libraries, the Teachable Machine model (if used) and the public broker. The bundled models are served with the app. For offline deployment, download and serve dependencies and model files locally.
@@ -113,7 +133,8 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 |---|---|
 | Manual MQTT test | JSON appears on the exact subscribed topic |
 | Known item under good lighting | Correct class, confidence and inference time |
-| Empty scene / unknown object | `unknown` class rather than a forced waste class |
+| Empty scene | *No item*, and nothing is published |
+| Item COCO does not know (can, box) | *No item*; with the centre-region fallback, a `fallback` message instead |
 | Confidence just below threshold | No publication |
 | Rapid class changes | Consecutive-frame rule suppresses flicker |
 | Network disconnection | MQTT state changes and reconnects after restoration |

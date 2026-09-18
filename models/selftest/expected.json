@@ -80,5 +80,15 @@
         "trash": 0.0103
       }
     }
+  },
+  "detector": {
+    "plastic.jpg": {
+      "label": "bottle",
+      "score": 0.714
+    },
+    "glass.jpg": {
+      "label": "bottle",
+      "score": 0.924
+    }
   }
 }

@@ -1,11 +1,11 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const fields = ["modelSource","modelUrl","normalization","backend","region","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
+const fields = ["pipeline","detScore","fallback","modelSource","modelUrl","normalization","backend","region","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
 const STORAGE_KEY = "prog6002-classifier", LOG_VISIBLE_KEY = "prog6002-log-visible";
 let model = null, stream = null, running = false, mqttClient = null, subscribedTopic = "";
 let candidate = "", candidateFrames = 0, lastPublishedClass = "", lastPublishedAt = 0;
-let sequence = 0, published = 0, received = 0, errorCount = 0, animationId = null;
+let sequence = 0, published = 0, received = 0, errorCount = 0, animationId = null, inferenceErrors = 0;
 
 // ---------- Event / error log ----------
 function log(message, level="info") {
@@ -135,6 +135,102 @@ async function loadBundledModel(key) {
   });
 }
 
+// ---------- Object detection (stage 1 of the hybrid pipeline) ----------
+// COCO-SSD finds everyday objects (80 COCO classes); the largest one is cropped and passed to the
+// material classifier. This keeps the background out of the classifier and gives a natural "no item".
+const DETECTOR_URL = "models/coco-ssd-lite/model.json";
+// COCO classes that are never the waste item being shown: people (hands) and background furniture/vehicles.
+const IGNORED_OBJECTS = new Set(["person", "dining table", "chair", "couch", "bed", "toilet", "tv", "refrigerator",
+  "oven", "sink", "bench", "potted plant", "car", "bus", "truck", "train", "airplane", "boat", "motorcycle", "bicycle"]);
+let detector = null;
+const cropCanvas = document.createElement("canvas");
+
+function usesDetection() { return $("pipeline").value === "hybrid"; }
+
+async function loadDetector() {
+  if (typeof cocoSsd === "undefined") throw new Error("COCO-SSD library failed to load. Check the internet connection and reload.");
+  await ensureBackend();
+  setText("detectedStatus", "Loading detector…");
+  detector = await cocoSsd.load({ base: "lite_mobilenet_v2", modelUrl: DETECTOR_URL });
+  const warmup = tf.zeros([300, 300, 3], "int32");
+  await detector.detect(warmup); warmup.dispose();
+  setText("detectedStatus", "—");
+  log("Object detector loaded: COCO-SSD lite MobileNetV2 (80 everyday object classes).");
+}
+
+function disposeDetector() { detector?.dispose(); detector = null; }
+
+function sourceSize(src) {
+  return src instanceof HTMLVideoElement ? [src.videoWidth, src.videoHeight]
+       : src instanceof HTMLImageElement ? [src.naturalWidth, src.naturalHeight] : [src.width, src.height];
+}
+
+// Square crop around a detection box with 15% padding, kept inside the frame.
+function squareAround([x, y, w, h], frameW, frameH) {
+  const side = Math.min(Math.max(w, h) * 1.15, frameW, frameH);
+  const cx = x + w / 2, cy = y + h / 2;
+  return { x: Math.min(Math.max(cx - side / 2, 0), frameW - side), y: Math.min(Math.max(cy - side / 2, 0), frameH - side), w: side, h: side };
+}
+
+// Detect -> crop -> classify. Returns {predictions, stats, detection, detections, mode}.
+// mode: "classify" (no detector), "detect" (object found), "fallback" (none found, centre classified), "none".
+async function analyseFrame(src) {
+  const region = $("region").value, preview = $("inputPreview");
+  // The video can briefly have no picture (starting up, phone rotating); skip such frames.
+  const [fw0, fh0] = sourceSize(src);
+  if (!fw0 || !fh0 || (src instanceof HTMLVideoElement && src.readyState < 2)) return { predictions: null, detections: [], mode: "waiting" };
+  if (!usesDetection()) return { ...(await model.predict(src, {region, preview})), detection: null, detections: [], mode: "classify" };
+  const detections = (await detector.detect(src, 10, Number(value("detScore")) || 0.4))
+    .filter(d => !IGNORED_OBJECTS.has(d.class));
+  if (!detections.length) {
+    if ($("fallback").value === "centre") return { ...(await model.predict(src, {region, preview})), detection: null, detections, mode: "fallback" };
+    return { predictions: null, stats: null, detection: null, detections, mode: "none" };
+  }
+  const detection = detections.reduce((a, b) => b.bbox[2] * b.bbox[3] > a.bbox[2] * a.bbox[3] ? b : a);
+  const [fw, fh] = sourceSize(src), r = squareAround(detection.bbox, fw, fh);
+  cropCanvas.width = cropCanvas.height = 256;
+  cropCanvas.getContext("2d").drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 256, 256);
+  return { ...(await model.predict(cropCanvas, {region: "full", preview})), detection, detections, mode: "detect" };
+}
+
+// Maps a rectangle in camera-frame pixels to the displayed video (object-fit: contain).
+function videoToScreen(video) {
+  const vw = video.videoWidth, vh = video.videoHeight, cw = video.clientWidth, ch = video.clientHeight;
+  const scale = Math.min(cw / vw, ch / vh);
+  return { scale, ox: (cw - vw * scale) / 2, oy: (ch - vh * scale) / 2 };
+}
+
+function drawDetections(detections = [], primary = null, material = null) {
+  const video = $("camera"), canvas = $("detectionOverlay");
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = video.clientWidth * dpr; canvas.height = video.clientHeight * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!video.videoWidth || !detections.length) return;
+  const {scale, ox, oy} = videoToScreen(video);
+  ctx.font = "600 13px system-ui, sans-serif"; ctx.textBaseline = "top";
+  for (const d of detections) {
+    const [x, y, w, h] = d.bbox.map(v => v * scale), isPrimary = d === primary;
+    ctx.lineWidth = isPrimary ? 3 : 1.5;
+    ctx.strokeStyle = isPrimary ? "#19e28a" : "#ffffffaa";
+    ctx.strokeRect(ox + x, oy + y, w, h);
+    const text = `${d.class} ${(d.score * 100).toFixed(0)}%` +
+                 (isPrimary && material ? ` → ${material.className} ${(material.probability * 100).toFixed(0)}%` : "");
+    const tw = ctx.measureText(text).width + 10, ty = Math.max(oy + y - 20, 0);
+    ctx.fillStyle = isPrimary ? "#0d6b44ee" : "#071723cc";
+    ctx.fillRect(ox + x, ty, tw, 19);
+    ctx.fillStyle = "white"; ctx.fillText(text, ox + x + 5, ty + 3);
+  }
+}
+
+function describeDetection({mode, detection, detections}) {
+  if (mode === "classify") return "Not used";
+  if (mode === "waiting") return "Waiting for camera…";
+  if (mode === "detect") return `${detection.class} ${(detection.score * 100).toFixed(0)}%` + (detections.length > 1 ? ` (+${detections.length - 1} more)` : "");
+  return mode === "fallback" ? "Nothing (classified centre)" : "Nothing detected";
+}
+
 // ---------- Compute backend ----------
 async function ensureBackend() {
   const wanted = $("backend").value;
@@ -163,7 +259,7 @@ function backendInfo() {
 
 async function backendChanged() {
   if (running) { log("Stop classification before changing the compute backend.", "error"); return; }
-  modelSettingsChanged();
+  modelSettingsChanged(); disposeDetector();
   try { log(`Compute backend: ${await ensureBackend()}.`); } catch (error) { log(error.message, "error"); }
 }
 
@@ -197,9 +293,19 @@ async function runSelfTest() {
   if (!BUNDLED_MODELS[key]) { log("Self-test is available for the bundled models only.", "warn"); return; }
   $("selfTestButton").disabled = true;
   try {
-    if (!model) await loadModel();
-    const expected = (await (await fetch(SELFTEST_DIR + "expected.json")).json())[key];
-    let passed = 0;
+    await loadPipeline();
+    const all = await (await fetch(SELFTEST_DIR + "expected.json")).json(), expected = all[key];
+    let passed = 0, total = Object.keys(expected).length;
+    if (detector) {
+      for (const [file, ref] of Object.entries(all.detector)) {
+        const found = await detector.detect(await loadImage(SELFTEST_DIR + file), 10, 0.2);
+        const best = found.length ? found.reduce((a, b) => b.bbox[2] * b.bbox[3] > a.bbox[2] * a.bbox[3] ? b : a) : null;
+        const ok = best?.class === ref.label && Math.abs(best.score - ref.score) < 0.1;
+        passed += ok; total += 1;
+        log(`Self-test detector ${file}: got ${best ? `${best.class} ${(best.score * 100).toFixed(1)}%` : "nothing"}, ` +
+            `reference ${ref.label} ${(ref.score * 100).toFixed(1)}% → ${ok ? "PASS" : "FAIL"}`, ok ? "info" : "error");
+      }
+    }
     for (const [file, ref] of Object.entries(expected)) {
       const {predictions} = await model.predict(await loadImage(SELFTEST_DIR + file), {region: "full", preview: $("inputPreview")});
       const top = predictions.reduce((a, b) => b.probability > a.probability ? b : a);
@@ -210,7 +316,7 @@ async function runSelfTest() {
       log(`Self-test ${file}: got ${top.className} ${(top.probability * 100).toFixed(1)}%, reference ${ref.label}; ` +
           `largest difference ${(diff * 100).toFixed(1)} points → ${ok ? "PASS" : "FAIL"}`, ok ? "info" : "error");
     }
-    const total = Object.keys(expected).length, info = backendInfo();
+    const info = backendInfo();
     if (passed === total) log(`Self-test passed ${passed}/${total} on ${info}. The model computes correctly on this device.`);
     else log(`Self-test FAILED ${total - passed}/${total} on ${info}. This backend gives wrong results on this device; ` +
              "choose WebAssembly under Compute backend and re-test.", "error");
@@ -223,7 +329,7 @@ async function classifyPhoto() {
   const file = $("photoInput").files[0];
   if (!file) return;
   try {
-    if (!model) await loadModel();
+    await loadPipeline();
     const url = URL.createObjectURL(file);
     const img = await loadImage(url);
     URL.revokeObjectURL(url);
@@ -232,10 +338,13 @@ async function classifyPhoto() {
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(img.naturalWidth * scale); canvas.height = Math.round(img.naturalHeight * scale);
     canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-    const {predictions, stats} = await model.predict(canvas, {region: $("region").value, preview: $("inputPreview")});
-    const {sorted} = showPredictions(predictions);
-    showInputStats(stats);
-    log(`Photo ${file.name}: ` + sorted.slice(0, 3).map(p => `${p.className} ${(p.probability * 100).toFixed(1)}%`).join(", "));
+    const frame = await analyseFrame(canvas);
+    setText("detectedStatus", describeDetection(frame));
+    if (!frame.predictions) { showNoItem(); log(`Photo ${file.name}: no object detected.`, "warn"); return; }
+    const {sorted} = showPredictions(frame.predictions);
+    showInputStats(frame.stats);
+    const found = frame.detection ? `detected ${frame.detection.class} ${(frame.detection.score * 100).toFixed(0)}% → ` : "";
+    log(`Photo ${file.name}: ${found}` + sorted.slice(0, 3).map(p => `${p.className} ${(p.probability * 100).toFixed(1)}%`).join(", "));
   } catch (error) { log(`Photo classification failed: ${error.message}`, "error"); }
   finally { $("photoInput").value = ""; }
 }
@@ -244,10 +353,10 @@ async function classifyPhoto() {
 function updateRegionGuide() {
   const video = $("camera"), guide = $("regionGuide");
   const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh || $("region").value === "full") { guide.hidden = true; return; }
-  const cw = video.clientWidth, ch = video.clientHeight;
-  const scale = Math.min(cw / vw, ch / vh);                // video uses object-fit: contain
-  const ox = (cw - vw * scale) / 2, oy = (ch - vh * scale) / 2;
+  // In detection mode the region is only used when nothing is detected and the fallback is "centre".
+  const regionUsed = !usesDetection() || $("fallback").value === "centre";
+  if (!vw || !vh || !regionUsed || $("region").value === "full") { guide.hidden = true; return; }
+  const {scale, ox, oy} = videoToScreen(video);
   const r = regionRect(vw, vh, $("region").value);
   Object.assign(guide.style, { left: `${ox + r.x * scale}px`, top: `${oy + r.y * scale}px`,
                                width: `${r.w * scale}px`, height: `${r.h * scale}px` });
@@ -350,10 +459,26 @@ async function loadModel() {
   $("className").textContent = "—"; $("predictions").replaceChildren();
 }
 
+// Loads whatever the chosen pipeline needs: the material classifier, plus the detector in hybrid mode.
+async function loadPipeline() {
+  if (!model) await loadModel();
+  if (usesDetection() && !detector) {
+    try { await loadDetector(); }
+    catch (error) { setText("detectedStatus", "Detector failed"); throw new Error(`Detector load failed: ${error.message}`); }
+  }
+}
+
 async function loadModelButton() {
   $("loadModelButton").disabled = true;
-  try { await loadModel(); } catch (error) { log(error.message, "error"); }
+  try { await loadPipeline(); } catch (error) { log(error.message, "error"); }
   finally { $("loadModelButton").disabled = false; }
+}
+
+function pipelineChanged() {
+  $("detectionFields").hidden = !usesDetection();
+  if (!usesDetection()) { drawDetections(); setText("detectedStatus", "Not used"); }
+  else if (!detector) setText("detectedStatus", "—");
+  updateRegionGuide();
 }
 
 function updateModelSourceUi() {
@@ -432,6 +557,7 @@ function stopAll() {
   stream = null;
   $("camera").srcObject = null;
   $("regionGuide").hidden = true;
+  drawDetections();
   $("cameraMessage").textContent = "Camera stopped";
   $("cameraMessage").classList.remove("hidden");
   $("startButton").disabled = false; $("stopButton").disabled = true;
@@ -455,17 +581,29 @@ function showPredictions(predictions) {
   return {top, sorted};
 }
 
+// Nothing detected: show "No item" and restart the stable-frame count, so nothing is published.
+function showNoItem() {
+  setText("className", "No item"); setText("confidenceText", "—");
+  $("confidenceBar").style.width = "0"; $("predictions").replaceChildren();
+  candidate = ""; candidateFrames = 0;
+}
+
 function updateStability(label) {
   if (label === candidate) candidateFrames += 1;
   else { candidate = label; candidateFrames = 1; }
 }
 
-function buildPayload(top, sorted, inferenceMs, source="camera") {
+// frame = result of analyseFrame (null for manual tests). The bounding box is normalised to 0-1 of the frame.
+function buildPayload(top, sorted, inferenceMs, source="camera", frame=null) {
   const modelUrl = model?.source ?? null;
+  const d = frame?.detection, [fw, fh] = d ? sourceSize($("camera")) : [1, 1];
   return {
     schema_version:1, message_type:"waste_classification", device_id:value("deviceId"),
     sequence:++sequence, timestamp:new Date().toISOString(), source,
+    pipeline: frame?.mode ?? null,
     classification:top.className, confidence:Number(top.probability.toFixed(4)),
+    detected_object: d ? { label:d.class, confidence:Number(d.score.toFixed(4)),
+      bbox: [d.bbox[0]/fw, d.bbox[1]/fh, d.bbox[2]/fw, d.bbox[3]/fh].map(v => Number(v.toFixed(4))) } : null,
     inference_ms:Math.round(inferenceMs), model_url:modelUrl,
     alternatives:sorted.slice(1,3).map(p=>({label:p.className, confidence:Number(p.probability.toFixed(4))}))
   };
@@ -487,7 +625,7 @@ function publishPayload(payload) {
   return publishText(JSON.stringify(payload), `${payload.classification} (${(payload.confidence*100).toFixed(1)}%)`);
 }
 
-function considerPublish(top, sorted, inferenceMs) {
+function considerPublish(top, sorted, inferenceMs, frame) {
   const threshold=Number(value("threshold")), required=Number(value("stableFrames")), cooldown=Number(value("cooldown"));
   updateStability(top.className);
   const now=Date.now(), stable=candidateFrames>=required, confident=top.probability>=threshold;
@@ -495,7 +633,7 @@ function considerPublish(top, sorted, inferenceMs) {
   if (stable && confident && (changed || cooldownPassed)) {
     // Without MQTT, keep classifying but do not try to publish (and do not flood the log).
     if (!mqttClient?.connected) return;
-    const payload=buildPayload(top,sorted,inferenceMs);
+    const payload=buildPayload(top,sorted,inferenceMs,"camera",frame);
     if (publishPayload(payload)) { lastPublishedClass=top.className; lastPublishedAt=now; candidateFrames=0; }
   }
 }
@@ -504,13 +642,25 @@ async function inferenceLoop() {
   if (!running) return;
   try {
     const start=performance.now();
-    const {predictions, stats}=await model.predict($("camera"), {region: $("region").value, preview: $("inputPreview")});
+    const frame=await analyseFrame($("camera"));
     const elapsed=performance.now()-start;
     setText("inferenceTime", `${Math.round(elapsed)} ms`);
-    showInputStats(stats);
-    const {top,sorted}=showPredictions(predictions);
-    considerPublish(top,sorted,elapsed);
-  } catch (error) { log(`Inference error: ${error.message}`, "error"); stopAll(); return; }
+    setText("detectedStatus", describeDetection(frame));
+    if (frame.predictions) {
+      showInputStats(frame.stats);
+      const {top,sorted}=showPredictions(frame.predictions);
+      drawDetections(frame.detections, frame.detection, top);
+      considerPublish(top,sorted,elapsed,frame);
+    } else if (frame.mode !== "waiting") {
+      showNoItem(); drawDetections(frame.detections);
+    }
+    inferenceErrors = 0;
+  } catch (error) {
+    // Tolerate occasional errors (e.g. a frame lost during rotation); stop only if they keep happening.
+    inferenceErrors += 1;
+    log(`Inference error (${inferenceErrors}/5): ${error.message}`, "error");
+    if (inferenceErrors >= 5) { log("Stopping after repeated inference errors.", "error"); stopAll(); return; }
+  }
   // Limit load on an old tablet. Approximately 4 inferences/second maximum.
   await new Promise(resolve=>setTimeout(resolve,250));
   animationId=requestAnimationFrame(inferenceLoop);
@@ -518,9 +668,9 @@ async function inferenceLoop() {
 
 async function start() {
   if (running) return;
-  $("startButton").disabled=true; setOverall("Starting…", "warn");
+  $("startButton").disabled=true; setOverall(model && (detector || !usesDetection()) ? "Starting…" : "Loading models…", "warn");
   try {
-    if (!model) await loadModel();
+    await loadPipeline();
     await startCamera(); running=true; setOverall("Classifying", "ok");
     if (!mqttClient?.connected) log("Classifying without MQTT: results will not be published until MQTT connects.", "warn");
     inferenceLoop();
@@ -648,6 +798,8 @@ $("modelSource").addEventListener("change",()=>{updateModelSourceUi(); modelSett
 $("modelFiles").addEventListener("change",()=>{showSelectedFiles(); modelSettingsChanged();});
 $("modelUrl").addEventListener("change",modelSettingsChanged);
 $("backend").addEventListener("change",backendChanged);
+$("pipeline").addEventListener("change",pipelineChanged);
+$("fallback").addEventListener("change",updateRegionGuide);
 $("region").addEventListener("change",updateRegionGuide);
 $("camera").addEventListener("loadedmetadata",updateRegionGuide);
 $("camera").addEventListener("resize",updateRegionGuide);   // fires when the phone rotates
@@ -670,4 +822,5 @@ window.addEventListener("unhandledrejection",e=>log(`Unhandled error: ${e.reason
 window.addEventListener("pagehide",()=>{stopAll(); if(mqttClient)mqttClient.end(true);});
 loadSettings();
 updateModelSourceUi();
+pipelineChanged();
 log("App ready. Test the camera and MQTT independently, or configure a model URL and start classifying.");
