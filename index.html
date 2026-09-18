@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#123047">
+  <title>PROG6002 Waste Classifier</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">PROG6002 · WEEK 4</span><h1>Waste classification edge app</h1></div>
+    <div id="overallStatus" class="pill warn">Not started</div>
+  </header>
+
+  <main>
+    <section class="camera-card">
+      <div class="video-wrap">
+        <video id="camera" autoplay muted playsinline></video>
+        <div id="cameraMessage" class="overlay">Tap “Start camera”</div>
+      </div>
+      <div class="result">
+        <span>Current result</span>
+        <strong id="className">—</strong>
+        <div class="confidence"><div id="confidenceBar"></div></div>
+        <span id="confidenceText">0%</span>
+      </div>
+      <div id="predictions" class="predictions"></div>
+      <div class="actions">
+        <button id="startButton" class="primary">Start camera & model</button>
+        <button id="stopButton" disabled>Stop</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Configuration</h2>
+      <label>Teachable Machine model URL
+        <input id="modelUrl" inputmode="url" placeholder="https://teachablemachine.withgoogle.com/models/MODEL_ID/">
+      </label>
+      <div class="grid two">
+        <label>Device ID <input id="deviceId" value="team01-tablet01"></label>
+        <label>MQTT topic <input id="mqttTopic" value="prog6002/2026/team01-tablet01/classification"></label>
+        <label>Broker WebSocket URL <input id="brokerUrl" value="wss://broker.hivemq.com:8884/mqtt"></label>
+        <label>Confidence threshold <input id="threshold" type="number" min="0.1" max="1" step="0.05" value="0.75"></label>
+        <label>Stable frames <input id="stableFrames" type="number" min="1" max="20" value="3"></label>
+        <label>Publish cooldown (ms) <input id="cooldown" type="number" min="500" step="500" value="5000"></label>
+      </div>
+      <details>
+        <summary>Optional broker credentials</summary>
+        <div class="grid two">
+          <label>Username <input id="mqttUsername" autocomplete="username"></label>
+          <label>Password <input id="mqttPassword" type="password" autocomplete="current-password"></label>
+        </div>
+        <p class="help">Browser credentials are visible to the user. Use a restricted classroom account, never an administrator account.</p>
+      </details>
+      <div class="actions">
+        <button id="mqttButton">Connect MQTT</button>
+        <button id="saveButton">Save on this tablet</button>
+        <button id="testButton">Publish test message</button>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <article class="panel status-panel">
+        <h2>System state</h2>
+        <dl>
+          <div><dt>Model</dt><dd id="modelStatus">Not loaded</dd></div>
+          <div><dt>Camera</dt><dd id="cameraStatus">Stopped</dd></div>
+          <div><dt>MQTT</dt><dd id="mqttStatus">Disconnected</dd></div>
+          <div><dt>Published</dt><dd id="publishedCount">0</dd></div>
+          <div><dt>Inference</dt><dd id="inferenceTime">—</dd></div>
+        </dl>
+      </article>
+      <article class="panel">
+        <h2>Last MQTT payload</h2>
+        <pre id="payloadPreview">No message published.</pre>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2>Event log</h2>
+      <ol id="eventLog" class="log"></ol>
+    </section>
+  </main>
+
+  <footer>Classification runs locally in the browser. Images are not sent through MQTT by this sample.</footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
