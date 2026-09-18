@@ -54,14 +54,20 @@
       <h2>Classifier configuration</h2>
       <label>Model source
         <select id="modelSource">
-          <option value="default" selected>Default waste model (bundled, lightweight)</option>
+          <option value="default" selected>Default: EcoVision MobileNetV3 (bundled, 10 classes)</option>
+          <option value="lite">Lite: TrashNet MobileNetV2 (bundled, fastest, less accurate)</option>
           <option value="url">Teachable Machine URL (online)</option>
           <option value="files">Upload model files (runs locally)</option>
         </select>
       </label>
       <div id="defaultSourceFields" class="source-fields">
-        <p class="help">MobileNetV2 (0.5 width, 160×160) trained on the TrashNet dataset: cardboard, glass, metal, paper,
-          plastic, trash. About 1.4&nbsp;MB, designed for older tablets. Works best with one item on a plain background.</p>
+        <p class="help"><a href="https://huggingface.co/AmadFR/ecovision_mobilenetv3" target="_blank" rel="noopener">EcoVision</a>
+          MobileNetV3-Large (MIT licence, by AmadFR) trained on about 20,000 images: battery, biological, cardboard, clothes,
+          glass, metal, paper, plastic, shoes, trash. 8.4&nbsp;MB download.</p>
+      </div>
+      <div id="liteSourceFields" class="source-fields" hidden>
+        <p class="help">MobileNetV2 (0.5 width, 160×160) trained on TrashNet: cardboard, glass, metal, paper, plastic, trash.
+          1.4&nbsp;MB and about 5× less computation. Needs one item on a plain background; tends to over-predict cardboard/paper.</p>
       </div>
       <div id="urlSourceFields" class="source-fields" hidden>
         <label>Teachable Machine model URL

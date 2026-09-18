@@ -10,28 +10,31 @@ This is a no-build browser application for demonstrating on-device image classif
 4. Publish a structured JSON result over MQTT WebSockets.
 5. Observe reconnect state, message timing and old-device performance.
 
-## Default model (bundled)
+## Bundled models
 
-The app loads a lightweight waste classifier from `models/waste-mobilenetv2/` by default, so it works without training anything first.
+The app ships with two waste classifiers, so it works without training anything first. Choose one under *Model source*.
 
-| Property | Value |
-|---|---|
-| Architecture | MobileNetV2, width 0.5, 160 × 160 input, ImageNet pretrained then fine-tuned |
-| Size | 714k parameters, 1.4 MB download (float16 weights) |
-| Classes | `cardboard`, `glass`, `metal`, `paper`, `plastic`, `trash` |
-| Training data | [TrashNet](https://huggingface.co/datasets/garythung/trashnet) (MIT licence), 2,527 images, 70/15/15 split |
-| Held-out test accuracy | 86% overall; cardboard 98%, paper 88%, glass 87%, metal 84%, plastic 83%, trash 57% |
+| | **Default: EcoVision MobileNetV3** | **Lite: TrashNet MobileNetV2** |
+|---|---|---|
+| Folder | `models/ecovision-mobilenetv3/` | `models/waste-mobilenetv2/` |
+| Architecture | MobileNetV3-Large, 224 × 224 input | MobileNetV2 width 0.5, 160 × 160 input |
+| Size | 4.2M parameters, 8.4 MB download | 714k parameters, 1.4 MB download |
+| Compute per frame | ≈ 220M multiply-adds | ≈ 50M multiply-adds (about 5× less) |
+| Classes | `battery`, `biological`, `cardboard`, `clothes`, `glass`, `metal`, `paper`, `plastic`, `shoes`, `trash` | `cardboard`, `glass`, `metal`, `paper`, `plastic`, `trash` |
+| Training data | ≈ 20,000 varied photos ([Garbage Classification V2](https://www.kaggle.com/datasets/sumn2u/garbage-classification-v2)) | 2,527 photos on a white background ([TrashNet](https://huggingface.co/datasets/garythung/trashnet)) |
+| Reported accuracy | ≈ 95% (author's test set) | 86% (held-out test set) |
+| Source and licence | [AmadFR/ecovision_mobilenetv3](https://huggingface.co/AmadFR/ecovision_mobilenetv3), MIT | Trained for this unit, `tools/train_waste_model.py` |
 
-The model needs about 50 million multiply-adds per frame, roughly the same load as the Teachable Machine models. That keeps it usable on older Android tablets.
+**EcoVision (the default)** was published as a PyTorch model. `tools/convert_ecovision.py` converts it: PyTorch → ONNX → TensorFlow (onnx2tf) → TF.js graph model with float16 weights. The ImageNet normalisation and softmax are built into the graph. On the author's example images, the converted TF.js model gave the same top class as the original PyTorch model every time, with probabilities within 0.006.
+
+**Lite** is only for tablets too slow to run EcoVision. It was trained on photos of single items on a white background, so in real camera scenes it over-predicts `cardboard` and `paper`.
 
 Limitations to discuss with students:
 
-- TrashNet photos show one item on a white background. Accuracy drops with cluttered scenes, hands in frame or poor lighting.
-- There is no `unknown`/`empty` class, so an empty scene is still forced into one of the six classes. The confidence threshold and stable-frame rules reduce, but do not remove, false publications.
-- `trash` has few training images and is the weakest class.
+- Neither model has an `unknown`/`empty` class, so an empty scene is still forced into a waste class. The confidence threshold and stable-frame rules reduce, but do not remove, false publications.
+- EcoVision's reported 95% comes from Kaggle datasets that overlap. Expect lower accuracy on your own tablet camera, lighting and backgrounds; measuring this is a good tutorial exercise.
 - The classes describe materials, not local bins. Map them to your council's bin categories in the MQTT consumer, or train a Teachable Machine model on your own items and bins.
-
-To retrain or change the architecture, run `tools/train_waste_model.py` (TensorFlow 2.15 with Keras 2, plus `tensorflowjs`). The script documents its settings in its header.
+- Check the **Inference** time on your tablet. If EcoVision is too slow, raise the stable-frame count or switch to Lite.
 
 ## Prepare your own model
 
@@ -90,7 +93,7 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 - The app requests 640 x 480 and limits inference to approximately four runs per second to reduce load.
 - Older tablets may terminate the tab when memory is low. Close other tabs and lower camera resolution or inference frequency if needed.
 - Keep the screen awake during demonstrations; browser background tabs are throttled.
-- Internet access is needed for the CDN libraries, the Teachable Machine model (if used) and the public broker. The bundled default model is served with the app. For offline deployment, download and serve dependencies and model files locally.
+- Internet access is needed for the CDN libraries, the Teachable Machine model (if used) and the public broker. The bundled models are served with the app. For offline deployment, download and serve dependencies and model files locally.
 - Browser-stored MQTT credentials are visible to the device user. Use a restricted teaching account and topic permissions.
 
 ## Suggested tutorial tests

@@ -12,5 +12,7 @@
   "normalization": "-1to1",
   "dataset": "TrashNet (MIT) https://huggingface.co/datasets/garythung/trashnet",
   "testAccuracy": 0.8602,
-  "params": 713910
+  "params": 713910,
+  "format": "layers-model",
+  "resize": "crop"
 }

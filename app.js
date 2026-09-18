@@ -113,23 +113,29 @@ async function loadModelFiles() {
   });
 }
 
-// Lightweight waste model shipped with the app (see tools/train_waste_model.py).
-const DEFAULT_MODEL_DIR = "models/waste-mobilenetv2/";
+// Waste models shipped with the app. Each folder has model.json, weights and metadata.json.
+const BUNDLED_MODELS = {
+  default: { dir: "models/ecovision-mobilenetv3/", title: "EcoVision MobileNetV3" },   // tools/convert_ecovision.py
+  lite:    { dir: "models/waste-mobilenetv2/",     title: "Lite TrashNet MobileNetV2" } // tools/train_waste_model.py
+};
 
-async function loadDefaultModel() {
-  if (location.protocol === "file:") throw new Error("The bundled model needs the page served over http(s), not opened as a file.");
-  const metaResponse = await fetch(DEFAULT_MODEL_DIR + "metadata.json");
+async function loadBundledModel(key) {
+  const {dir, title} = BUNDLED_MODELS[key];
+  if (location.protocol === "file:") throw new Error("Bundled models need the page served over http(s), not opened as a file.");
+  const metaResponse = await fetch(dir + "metadata.json");
   if (!metaResponse.ok) throw new Error(`Bundled model metadata not found (${metaResponse.status}).`);
   const meta = await metaResponse.json();
-  const net = await tf.loadLayersModel(DEFAULT_MODEL_DIR + "model.json");
+  const net = meta.format === "graph-model" ? await tf.loadGraphModel(dir + "model.json")
+                                            : await tf.loadLayersModel(dir + "model.json");
   return wrapTfjsModel(net, {
-    labels: meta.labels ?? [], normalization: meta.normalization ?? "-1to1",
-    source: `bundled:${meta.modelName ?? "waste-model"}`, name: `Default waste model (${meta.architecture ?? "bundled"})`
+    labels: meta.labels ?? [], normalization: meta.normalization ?? "-1to1", resize: meta.resize ?? "crop",
+    source: `bundled:${meta.modelName ?? key}`, name: `${title} (${meta.architecture ?? "bundled"})`
   });
 }
 
 // Wraps any TF.js image classifier in the app's predict(video) interface.
-function wrapTfjsModel(net, {labels, normalization, source, name}) {
+// resize: "crop" = centre-crop to square then resize (Teachable Machine); "stretch" = resize whole frame.
+function wrapTfjsModel(net, {labels, normalization, resize = "crop", source, name}) {
   const inputShape = net.inputs[0].shape;          // e.g. [null, 224, 224, 3]
   const height = inputShape[1] > 0 ? inputShape[1] : 224;
   const width = inputShape[2] > 0 ? inputShape[2] : 224;
@@ -144,9 +150,10 @@ function wrapTfjsModel(net, {labels, normalization, source, name}) {
   function preprocess(video) {
     return tf.tidy(() => {
       let img = tf.browser.fromPixels(video);        // [H, W, 3] int32
-      const [h, w] = img.shape, size = Math.min(h, w);
-      // Centre-crop to a square (matches Teachable Machine), then resize.
-      img = img.slice([Math.floor((h - size) / 2), Math.floor((w - size) / 2), 0], [size, size, 3]);
+      if (resize === "crop") {
+        const [h, w] = img.shape, size = Math.min(h, w);
+        img = img.slice([Math.floor((h - size) / 2), Math.floor((w - size) / 2), 0], [size, size, 3]);
+      }
       img = tf.image.resizeBilinear(img, [height, width]).toFloat();
       if (channels === 1) img = img.mean(2, true);
       if (normalization === "-1to1") img = img.div(127.5).sub(1);
@@ -183,8 +190,9 @@ async function loadModel() {
   const source = $("modelSource").value;
   setText("modelStatus", "Loading…");
   try {
-    const loaders = { default: loadDefaultModel, files: loadModelFiles, url: loadTeachableMachineUrl };
-    const loaded = await (loaders[source] ?? loadDefaultModel)();
+    const loaded = source === "files" ? await loadModelFiles()
+                 : source === "url" ? await loadTeachableMachineUrl()
+                 : await loadBundledModel(BUNDLED_MODELS[source] ? source : "default");
     if (model) model.dispose?.();
     model = loaded;
   } catch (error) {
@@ -205,6 +213,7 @@ async function loadModelButton() {
 function updateModelSourceUi() {
   const source = $("modelSource").value;
   $("defaultSourceFields").hidden = source !== "default";
+  $("liteSourceFields").hidden = source !== "lite";
   $("urlSourceFields").hidden = source !== "url";
   $("fileSourceFields").hidden = source !== "files";
 }
