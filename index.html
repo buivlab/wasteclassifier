@@ -10,14 +10,30 @@
 <body>
   <header>
     <div><span class="eyebrow">PROG6002 · WEEK 4</span><h1>Waste classification edge app</h1></div>
-    <div id="overallStatus" class="pill warn">Not started</div>
+    <div class="header-actions">
+      <button id="logToggle" class="log-toggle" aria-expanded="true" aria-controls="logPanel">
+        Hide log <span id="errorBadge" class="badge" hidden>0</span>
+      </button>
+      <div id="overallStatus" class="pill warn">Not started</div>
+    </div>
   </header>
 
   <main>
+    <section id="logPanel" class="panel log-panel">
+      <div class="panel-head">
+        <h2>Event &amp; error log</h2>
+        <div class="log-tools">
+          <label class="inline"><input id="errorsOnly" type="checkbox"> Errors only</label>
+          <button id="clearLogButton" class="small">Clear</button>
+        </div>
+      </div>
+      <ol id="eventLog" class="log"></ol>
+    </section>
+
     <section class="camera-card">
       <div class="video-wrap">
         <video id="camera" autoplay muted playsinline></video>
-        <div id="cameraMessage" class="overlay">Tap “Start camera”</div>
+        <div id="cameraMessage" class="overlay">Tap “Test camera only” or “Start camera &amp; model”</div>
       </div>
       <div class="result">
         <span>Current result</span>
@@ -27,24 +43,34 @@
       </div>
       <div id="predictions" class="predictions"></div>
       <div class="actions">
-        <button id="startButton" class="primary">Start camera & model</button>
+        <button id="startButton" class="primary">Start camera &amp; model</button>
+        <button id="cameraTestButton">Test camera only</button>
         <button id="stopButton" disabled>Stop</button>
       </div>
+      <p class="help">“Test camera only” opens the camera without loading the model or publishing anything.</p>
     </section>
 
     <section class="panel">
-      <h2>Configuration</h2>
+      <h2>Classifier configuration</h2>
       <label>Teachable Machine model URL
         <input id="modelUrl" inputmode="url" placeholder="https://teachablemachine.withgoogle.com/models/MODEL_ID/">
       </label>
       <div class="grid two">
         <label>Device ID <input id="deviceId" value="team01-tablet01"></label>
-        <label>MQTT topic <input id="mqttTopic" value="prog6002/2026/team01-tablet01/classification"></label>
-        <label>Broker WebSocket URL <input id="brokerUrl" value="wss://broker.hivemq.com:8884/mqtt"></label>
         <label>Confidence threshold <input id="threshold" type="number" min="0.1" max="1" step="0.05" value="0.75"></label>
         <label>Stable frames <input id="stableFrames" type="number" min="1" max="20" value="3"></label>
         <label>Publish cooldown (ms) <input id="cooldown" type="number" min="500" step="500" value="5000"></label>
       </div>
+    </section>
+
+    <section class="panel">
+      <h2>MQTT test</h2>
+      <div class="grid two">
+        <label>Broker WebSocket URL <input id="brokerUrl" inputmode="url" value="wss://broker.hivemq.com:8884/mqtt"
+          placeholder="broker.hivemq.com:8884/mqtt"></label>
+        <label>Publish topic <input id="mqttTopic" value="prog6002/2026/team01-tablet01/classification"></label>
+      </div>
+      <p class="help"><code>wss://</code> is added automatically if the URL has no scheme.</p>
       <details>
         <summary>Optional broker credentials</summary>
         <div class="grid two">
@@ -56,8 +82,31 @@
       <div class="actions">
         <button id="mqttButton">Connect MQTT</button>
         <button id="saveButton">Save on this tablet</button>
-        <button id="testButton">Publish test message</button>
       </div>
+
+      <div class="grid two mqtt-tests">
+        <div>
+          <h3>Publish</h3>
+          <label>Message (JSON or plain text; blank = sample classification)
+            <textarea id="testMessage" rows="4" placeholder='{"hello":"world"}'></textarea>
+          </label>
+          <div class="actions">
+            <button id="testButton" disabled>Publish test message</button>
+          </div>
+        </div>
+        <div>
+          <h3>Subscribe</h3>
+          <label>Subscribe topic (wildcards + and # allowed)
+            <input id="subscribeTopic" value="prog6002/2026/team01-tablet01/#">
+          </label>
+          <div class="actions">
+            <button id="subscribeButton" disabled>Subscribe</button>
+            <button id="clearReceivedButton">Clear received</button>
+          </div>
+        </div>
+      </div>
+      <h3>Received messages <span id="receivedCount" class="count">0</span></h3>
+      <ol id="receivedLog" class="log received"></ol>
     </section>
 
     <section class="grid two">
@@ -67,6 +116,7 @@
           <div><dt>Model</dt><dd id="modelStatus">Not loaded</dd></div>
           <div><dt>Camera</dt><dd id="cameraStatus">Stopped</dd></div>
           <div><dt>MQTT</dt><dd id="mqttStatus">Disconnected</dd></div>
+          <div><dt>Subscribed</dt><dd id="subscribedStatus">—</dd></div>
           <div><dt>Published</dt><dd id="publishedCount">0</dd></div>
           <div><dt>Inference</dt><dd id="inferenceTime">—</dd></div>
         </dl>
@@ -75,11 +125,6 @@
         <h2>Last MQTT payload</h2>
         <pre id="payloadPreview">No message published.</pre>
       </article>
-    </section>
-
-    <section class="panel">
-      <h2>Event log</h2>
-      <ol id="eventLog" class="log"></ol>
     </section>
   </main>
 
