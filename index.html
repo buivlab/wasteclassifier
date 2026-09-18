@@ -37,8 +37,11 @@
         <div id="regionGuide" class="region-guide" hidden><span>Fill this box with the item</span></div>
         <div id="cameraMessage" class="overlay">Tap “Test camera only” or “Start camera &amp; model”</div>
       </div>
+      <div id="binBadge" class="bin-badge" aria-live="polite">
+        <strong>—</strong><span>Start the camera and hold one item in front of it.</span>
+      </div>
       <div class="result">
-        <span>Current result</span>
+        <span>Detected as</span>
         <strong id="className">—</strong>
         <div class="confidence"><div id="confidenceBar"></div></div>
         <span id="confidenceText">0%</span>
@@ -86,14 +89,15 @@
       <h2>Classifier configuration</h2>
       <label>Pipeline
         <select id="pipeline">
-          <option value="hybrid" selected>Detect the object, then classify its material (recommended)</option>
+          <option value="coco" selected>Detect the object, bin from its COCO label (recommended)</option>
+          <option value="hybrid">Detect the object, then classify its material</option>
           <option value="classify">Classify a fixed region only (no detection)</option>
         </select>
       </label>
       <div id="detectionFields" class="source-fields">
-        <p class="help">Stage 1: <strong>COCO-SSD</strong> (Apache-2.0, 9&nbsp;MB) finds everyday objects such as bottles, cups,
-          fruit and books, and ignores people and furniture. Stage 2: the largest object is cropped and its material is
-          classified by the model below. Items COCO does not know (crumpled paper, boxes, cans, batteries) may not be detected.</p>
+        <p class="help"><strong>COCO-SSD</strong> (Apache-2.0, 9&nbsp;MB) finds everyday objects such as bottles, cups,
+          fruit, books and phones. The largest object's label decides the bin using the table below. People and furniture
+          are ignored. Items COCO does not know (cans, boxes, crumpled paper, batteries) are not detected.</p>
         <div class="grid two">
           <label>Minimum detection score <input id="detScore" type="number" min="0.1" max="0.95" step="0.05" value="0.4"></label>
           <label>When nothing is detected
@@ -103,7 +107,16 @@
             </select>
           </label>
         </div>
+        <details class="bin-mapping">
+          <summary>Bin mapping: COCO object → bin (editable)</summary>
+          <p class="help">Defaults follow common Australian kerbside rules and are defined in <code>bins.js</code>.
+            Councils differ, so adjust them here; changes are saved on this device and highlighted.</p>
+          <div class="table-wrap"><table><thead><tr><th>Object</th><th>Bin</th></tr></thead>
+            <tbody id="binMappingRows"></tbody></table></div>
+          <div class="actions"><button id="resetBinsButton" class="small">Reset to defaults</button></div>
+        </details>
       </div>
+      <div id="classifierFields">
       <label>Material classifier (model source)
         <select id="modelSource">
           <option value="default" selected>Default: EcoVision MobileNetV3 (bundled, 10 classes)</option>
@@ -141,6 +154,7 @@
         <p class="help">Accepts TensorFlow.js layers or graph models, including a Teachable Machine “TensorFlow.js” export.
           The files stay on this device; they are not uploaded to any server.</p>
       </div>
+      </div>
       <label>Compute backend
         <select id="backend">
           <option value="webgl" selected>WebGL (GPU) – fastest on most devices</option>
@@ -153,7 +167,7 @@
       </div>
       <div class="grid two">
         <label>Device ID <input id="deviceId" value="team01-tablet01"></label>
-        <label>Confidence threshold <input id="threshold" type="number" min="0.1" max="1" step="0.05" value="0.75"></label>
+        <label>Confidence threshold <input id="threshold" type="number" min="0.1" max="1" step="0.05" value="0.6"></label>
         <label>Stable frames <input id="stableFrames" type="number" min="1" max="20" value="3"></label>
         <label>Publish cooldown (ms) <input id="cooldown" type="number" min="500" step="500" value="5000"></label>
       </div>
@@ -173,7 +187,10 @@
           <label>Username <input id="mqttUsername" autocomplete="username"></label>
           <label>Password <input id="mqttPassword" type="password" autocomplete="current-password"></label>
         </div>
-        <p class="help">Browser credentials are visible to the user. Use a restricted classroom account, never an administrator account.</p>
+        <label class="inline"><input id="rememberPassword" type="checkbox"> Remember password on this device</label>
+        <p class="help">Browser credentials are visible to the user. Use a restricted classroom account, never an administrator account.
+          A remembered password is stored unencrypted in this browser; only tick this on a device you control.
+          Unticking removes it immediately.</p>
       </details>
       <div class="actions">
         <button id="mqttButton">Connect MQTT</button>
@@ -233,6 +250,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
   <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+  <script src="bins.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

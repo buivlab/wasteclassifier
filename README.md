@@ -1,6 +1,6 @@
-# Week 4 Android tablet waste classifier
+# Week 4 Android tablet waste sorter: which bin?
 
-This is a no-build browser application for demonstrating on-device object detection, image classification and MQTT publication on an old Android tablet. Everything runs in the browser with TensorFlow.js. The sample publishes labels, confidence and timing metadata; it does not publish camera images.
+This is a no-build browser application for demonstrating on-device object detection and MQTT publication on an old Android tablet. It shows which kerbside bin an item belongs in: 🔴 red (general waste), 🟡 yellow (recycling) or 🟢 green (food & garden organics). Everything runs in the browser with TensorFlow.js. The app publishes the label, bin, confidence and timing metadata; it does not publish camera images.
 
 ## What students learn
 
@@ -10,22 +10,35 @@ This is a no-build browser application for demonstrating on-device object detect
 4. Publish a structured JSON result over MQTT WebSockets.
 5. Observe reconnect state, message timing and old-device performance.
 
-## How it works: detect, then classify
+## How it works: object → bin
 
-By default the app uses a two-stage pipeline (*Pipeline* under *Classifier configuration*):
+By default (*Pipeline*: **Detect the object, bin from its COCO label**):
 
-1. **Detect.** [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd) (lite MobileNetV2, Apache-2.0, `models/coco-ssd-lite/`, 9 MB) finds everyday objects in the camera frame, such as bottles, cups, fruit and books, and draws a box around each one. People (for example, the hand holding the item) and background furniture are ignored.
-2. **Crop.** The largest remaining object is cut out as a square with a little padding.
-3. **Classify.** The material classifier (below) classifies only that crop, so the background no longer influences the result.
-4. **No object, no message.** If nothing is detected, the app shows **No item** and publishes nothing. This replaces the missing `unknown` class.
+1. **Detect.** [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd) (lite MobileNetV2, Apache-2.0, `models/coco-ssd-lite/`, 9 MB) finds everyday objects in the camera frame and draws a box around each one.
+2. **Pick the item.** Objects mapped to *Ignore* (people and hands, animals, vehicles, furniture) are dropped. The largest remaining object is the item being shown.
+3. **Look up the bin.** The object's COCO label (for example `bottle`, `cup`, `banana`, `laptop`) decides the bin through the mapping in [`bins.js`](bins.js).
+4. **No object, no message.** If nothing is detected, the app shows **No item** and publishes nothing.
 
-Trade-off to discuss with students: COCO-SSD only knows 80 everyday object classes. It detects bottles, cups, bowls, fruit, books and similar items well, but it has no class for cans, boxes, crumpled paper or batteries. For those, set *When nothing is detected* to **Classify the centre region instead**. The message then records `"pipeline": "fallback"` so the consumer knows no object was located. Choosing *Classify a fixed region only* switches detection off completely.
+| Bin | Default COCO objects |
+|---|---|
+| 🟡 Yellow: recycling | bottle, book |
+| 🟢 Green: food & garden organics | banana, apple, orange, broccoli, carrot, sandwich, hot dog, pizza, donut, cake |
+| 🔴 Red: general waste | cup, wine glass, bowl, cutlery, vase, scissors, toothbrush, soft toys, bags, sports gear |
+| ⚪ No kerbside bin: e-waste drop-off | laptop, cell phone, keyboard, mouse, remote, microwave, toaster, hair drier, clock |
+
+Cups go to red because takeaway cups are plastic-lined and mugs are ceramic; drinking glasses are also not kerbside-recyclable. Electronics are not allowed in any kerbside bin, so they get their own grey result rather than red.
+
+**Councils differ.** Edit the defaults in `bins.js`, or open *Bin mapping* in the app and change any object's bin. In-app changes are saved on the device and highlighted; *Reset to defaults* restores `bins.js`. Deciding and justifying these rules for your council is a good student exercise.
+
+**Why not a material classifier?** An earlier version cropped the detected object and asked a waste-material classifier (EcoVision) for its material. The classifier can only answer one of its 10 materials, so for anything else it guesses. In testing, COCO correctly found a `cup` (95%), which the classifier then called `paper` (48%, yellow bin: wrong). COCO's own label is more reliable for deciding the bin. The material-classifier pipelines are still available under *Pipeline* for comparison, and the classifier model is only downloaded when one of them is selected.
+
+**Limitation to discuss with students:** COCO-SSD only knows 80 everyday object classes. It has no class for cans, boxes, crumpled paper or batteries, so these give **No item**. Setting *When nothing is detected* to **Classify the centre region instead** sends those frames to the material classifier; the message then records `"pipeline": "fallback"`.
 
 The detector's weights were stored as float16 with `tools/quantize_tfjs_fp16.py`, halving the download from 18 MB. Its boxes and scores match the original float32 model to within 0.003.
 
-## Bundled material classifiers
+## Bundled material classifiers (optional pipelines)
 
-The app ships with two waste classifiers, so it works without training anything first. Choose one under *Model source*.
+These are used only by the *detect then classify material* and *classify a fixed region* pipelines, or by the centre-region fallback. Choose one under *Material classifier*.
 
 | | **Default: EcoVision MobileNetV3** | **Lite: TrashNet MobileNetV2** |
 |---|---|---|
@@ -51,7 +64,7 @@ Limitations to discuss with students:
 
 ## Troubleshooting: "everything is cardboard or paper"
 
-With detection on, this should be rare, because the classifier only sees the detected object. With detection off or in fallback mode, both bundled models answer `cardboard` or `paper` when they see little except background. This happens with a black, grey or white frame, a plain wall or table, or random noise. If every item gets these labels, the model is not seeing the item. Work through the panel **What the model sees & diagnostics**:
+This applies to the material-classifier pipelines only; the default COCO → bin pipeline does not use a classifier. With detection off or in fallback mode, both bundled classifiers answer `cardboard` or `paper` when they see little except background. This happens with a black, grey or white frame, a plain wall or table, or random noise. If every item gets these labels, the model is not seeing the item. Work through the panel **What the model sees & diagnostics**:
 
 1. **Check the preview thumbnail.** It shows exactly what the model receives. If it is black or blank, the camera frames are not reaching the model. *Brightness* and *Contrast* are shown under it; contrast below about 8 means a blank frame, and the log warns about this.
 2. **Fill the dashed box with the item.** Only the area inside the box is classified. In testing, a bottle occupying about a third of the frame on a plain table was classified as `paper` (whole frame or centre square) but as `plastic` at 99.9% with *zoom 2×*.
@@ -87,32 +100,37 @@ The page must be served over HTTPS for camera access. Opening `index.html` direc
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "message_type": "waste_classification",
   "device_id": "team01-tablet01",
   "sequence": 7,
-  "timestamp": "2026-09-18T03:20:10.250Z",
+  "timestamp": "2026-09-19T03:20:10.250Z",
   "source": "camera",
-  "pipeline": "detect",
-  "classification": "plastic",
-  "confidence": 0.9341,
+  "pipeline": "coco",
+  "bin": "yellow",
+  "bin_description": "Recycling",
+  "classification": "bottle",
+  "confidence": 0.8942,
   "detected_object": {"label": "bottle", "confidence": 0.8942, "bbox": [0.1623, 0.1303, 0.7769, 0.5803]},
-  "inference_ms": 186,
-  "model_url": "bundled:ecovision-mobilenetv3-large",
-  "alternatives": [{"label":"glass","confidence":0.0412}]
+  "inference_ms": 96,
+  "model": "coco-ssd-lite",
+  "alternatives": [{"label": "cup", "confidence": 0.61, "bin": "red"}]
 }
 ```
 
-- `pipeline`: `detect` (object detected, then classified), `fallback` (nothing detected; the centre region was classified), or `classify` (detection switched off).
-- `classification` and `confidence` come from the material classifier.
+- `bin`: `red`, `yellow`, `green`, `ewaste`, or `null` when the label has no bin rule.
+- `pipeline`: `coco` (COCO label decided the bin), `detect` (object detected, material classifier decided), `fallback` (nothing detected; the centre region was classified), or `classify` (detection switched off).
+- `classification` is the label that decided the bin: the COCO object in `coco` mode, otherwise the classifier's material.
 - `detected_object` is `null` unless an object was detected. `bbox` is `[x, y, width, height]` as fractions (0–1) of the camera frame.
+- `alternatives` lists other detected objects (or runner-up classes) with their bins.
+- Schema version 2 added `bin`, `bin_description` and `model` (which replaced `model_url`).
 
 ## Stability mechanism
 
 The result is published only when:
 
-- the top confidence reaches the configured threshold (default 0.75);
-- the same top class occurs for the configured number of consecutive frames (default 3); and
+- the confidence reaches the configured threshold (default 0.6; COCO scores for clearly visible objects are typically 0.6–0.95);
+- the same label and bin occur for the configured number of consecutive frames (default 3); and
 - the class has changed, or the cooldown has expired (default 5 seconds).
 
 This reduces flicker and unnecessary MQTT traffic. Students should benchmark thresholds and stable-frame counts against accuracy, latency and message volume rather than copying the defaults without evidence.
@@ -134,6 +152,8 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 | Manual MQTT test | JSON appears on the exact subscribed topic |
 | Known item under good lighting | Correct class, confidence and inference time |
 | Empty scene | *No item*, and nothing is published |
+| Bottle, banana, cup, phone | Yellow, green, red and *No kerbside bin* respectively |
+| Change a rule in *Bin mapping* | The new bin is shown and published; the row is marked as changed |
 | Item COCO does not know (can, box) | *No item*; with the centre-region fallback, a `fallback` message instead |
 | Confidence just below threshold | No publication |
 | Rapid class changes | Consecutive-frame rule suppresses flicker |

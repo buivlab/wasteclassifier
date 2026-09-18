@@ -2,7 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 const fields = ["pipeline","detScore","fallback","modelSource","modelUrl","normalization","backend","region","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
-const STORAGE_KEY = "prog6002-classifier", LOG_VISIBLE_KEY = "prog6002-log-visible";
+const STORAGE_KEY = "prog6002-classifier", LOG_VISIBLE_KEY = "prog6002-log-visible", SETTINGS_VERSION = 2;
+const PASSWORD_KEY = "prog6002-mqtt-password";   // only written when "Remember password" is ticked
 let model = null, stream = null, running = false, mqttClient = null, subscribedTopic = "";
 let candidate = "", candidateFrames = 0, lastPublishedClass = "", lastPublishedAt = 0;
 let sequence = 0, published = 0, received = 0, errorCount = 0, animationId = null, inferenceErrors = 0;
@@ -42,8 +43,14 @@ function value(id) { return $(id).value.trim(); }
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    // Settings saved before version 2 predate the COCO → bin pipeline; keep everything except the old pipeline choice.
+    if (saved.settingsVersion !== SETTINGS_VERSION) { delete saved.pipeline; delete saved.fallback; }
     fields.forEach(id => { if (saved[id] !== undefined) $(id).value = saved[id]; });
   } catch (error) { log(`Saved configuration ignored: ${error.message}`, "error"); }
+  try {
+    const password = localStorage.getItem(PASSWORD_KEY);
+    if (password !== null) { $("mqttPassword").value = password; $("rememberPassword").checked = true; }
+  } catch {}
   let logVisible = true;
   try { logVisible = localStorage.getItem(LOG_VISIBLE_KEY) !== "0"; } catch {}
   setLogVisible(logVisible);
@@ -51,10 +58,23 @@ function loadSettings() {
 
 function saveSettings() {
   try {
-    const data = Object.fromEntries(fields.map(id => [id, $(id).value]));
+    const data = { settingsVersion: SETTINGS_VERSION, ...Object.fromEntries(fields.map(id => [id, $(id).value])) };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    log("Configuration saved on this tablet (password is not stored).");
+    const remember = $("rememberPassword").checked;
+    if (remember) localStorage.setItem(PASSWORD_KEY, $("mqttPassword").value);
+    else localStorage.removeItem(PASSWORD_KEY);
+    log(`Configuration saved on this tablet (${remember ? "including the MQTT password, stored unencrypted" : "password is not stored"}).`);
   } catch (error) { log(`Could not save configuration: ${error.message}`, "error"); }
+}
+
+// Opt-in only. Unticking forgets a stored password straight away, without needing to press Save.
+function rememberPasswordChanged() {
+  if ($("rememberPassword").checked) {
+    log("The MQTT password will be stored on this device when you tap “Save on this tablet”.", "warn");
+    return;
+  }
+  try { localStorage.removeItem(PASSWORD_KEY); } catch {}
+  log("Stored MQTT password removed from this device.");
 }
 
 // ---------- Model URL ----------
@@ -135,17 +155,33 @@ async function loadBundledModel(key) {
   });
 }
 
-// ---------- Object detection (stage 1 of the hybrid pipeline) ----------
-// COCO-SSD finds everyday objects (80 COCO classes); the largest one is cropped and passed to the
-// material classifier. This keeps the background out of the classifier and gives a natural "no item".
+// ---------- Bins ----------
+// Mapping rules live in bins.js. Edits made in the app are stored on this device as overrides.
+const BIN_MAP_KEY = "prog6002-bin-map";
+let binOverrides = {};
+try { binOverrides = JSON.parse(localStorage.getItem(BIN_MAP_KEY) || "{}"); } catch {}
+
+function cocoBin(label) { return binOverrides[label] ?? DEFAULT_COCO_BINS[label] ?? "ignore"; }
+
+// Bin for any label: a COCO object, a material (bundled classifiers) or a custom model class name.
+function binFor(label) {
+  const key = String(label).trim().toLowerCase();
+  if (key in DEFAULT_COCO_BINS) { const b = cocoBin(key); return b === "ignore" ? null : b; }
+  if (LABEL_BINS[key]) return LABEL_BINS[key];
+  const word = Object.keys(LABEL_BINS).find(w => key.includes(w));   // e.g. "yellow bin", "food scraps"
+  return word ? LABEL_BINS[word] : null;
+}
+
+// ---------- Object detection ----------
+// COCO-SSD finds everyday objects (80 COCO classes). In "coco" mode the object's own label decides the bin;
+// in "hybrid" mode the object is cropped and a material classifier decides.
 const DETECTOR_URL = "models/coco-ssd-lite/model.json";
-// COCO classes that are never the waste item being shown: people (hands) and background furniture/vehicles.
-const IGNORED_OBJECTS = new Set(["person", "dining table", "chair", "couch", "bed", "toilet", "tv", "refrigerator",
-  "oven", "sink", "bench", "potted plant", "car", "bus", "truck", "train", "airplane", "boat", "motorcycle", "bicycle"]);
 let detector = null;
 const cropCanvas = document.createElement("canvas");
 
-function usesDetection() { return $("pipeline").value === "hybrid"; }
+function pipeline() { return $("pipeline").value; }
+function usesDetection() { return pipeline() !== "classify"; }
+function needsClassifier() { return pipeline() !== "coco" || $("fallback").value === "centre"; }
 
 async function loadDetector() {
   if (typeof cocoSsd === "undefined") throw new Error("COCO-SSD library failed to load. Check the internet connection and reload.");
@@ -172,25 +208,48 @@ function squareAround([x, y, w, h], frameW, frameH) {
   return { x: Math.min(Math.max(cx - side / 2, 0), frameW - side), y: Math.min(Math.max(cy - side / 2, 0), frameH - side), w: side, h: side };
 }
 
-// Detect -> crop -> classify. Returns {predictions, stats, detection, detections, mode}.
-// mode: "classify" (no detector), "detect" (object found), "fallback" (none found, centre classified), "none".
+// Turns classifier predictions into a result: top label, its bin, and the runners-up.
+function classifierResult(predictions) {
+  const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
+  return { label: sorted[0].className, confidence: sorted[0].probability, bin: binFor(sorted[0].className),
+           alternatives: sorted.slice(1, 5).map(p => ({ label: p.className, confidence: p.probability, bin: binFor(p.className) })) };
+}
+
+// One frame through the chosen pipeline. Returns {mode, result, detection, detections, stats}.
+// result = {label, confidence, bin, alternatives} or null when there is nothing to report.
+// mode: "coco" | "detect" (hybrid, object found) | "classify" | "fallback" (nothing found, centre classified)
+//       | "none" (nothing found) | "waiting" (camera has no picture yet).
 async function analyseFrame(src) {
   const region = $("region").value, preview = $("inputPreview");
   // The video can briefly have no picture (starting up, phone rotating); skip such frames.
-  const [fw0, fh0] = sourceSize(src);
-  if (!fw0 || !fh0 || (src instanceof HTMLVideoElement && src.readyState < 2)) return { predictions: null, detections: [], mode: "waiting" };
-  if (!usesDetection()) return { ...(await model.predict(src, {region, preview})), detection: null, detections: [], mode: "classify" };
+  const [fw, fh] = sourceSize(src);
+  if (!fw || !fh || (src instanceof HTMLVideoElement && src.readyState < 2)) return { mode: "waiting", result: null, detections: [] };
+  const classify = async (source, reg, mode, detection = null, detections = []) => {
+    const {predictions, stats} = await model.predict(source, {region: reg, preview});
+    return { mode, result: classifierResult(predictions), detection, detections, stats };
+  };
+  if (!usesDetection()) return classify(src, region, "classify");
+
   const detections = (await detector.detect(src, 10, Number(value("detScore")) || 0.4))
-    .filter(d => !IGNORED_OBJECTS.has(d.class));
+    .map(d => ({ ...d, bin: cocoBin(d.class) })).filter(d => d.bin !== "ignore");
   if (!detections.length) {
-    if ($("fallback").value === "centre") return { ...(await model.predict(src, {region, preview})), detection: null, detections, mode: "fallback" };
-    return { predictions: null, stats: null, detection: null, detections, mode: "none" };
+    if ($("fallback").value === "centre") return classify(src, region, "fallback");
+    return { mode: "none", result: null, detection: null, detections };
   }
+  // The largest object is the one being shown to the camera.
   const detection = detections.reduce((a, b) => b.bbox[2] * b.bbox[3] > a.bbox[2] * a.bbox[3] ? b : a);
-  const [fw, fh] = sourceSize(src), r = squareAround(detection.bbox, fw, fh);
+  const r = squareAround(detection.bbox, fw, fh);
   cropCanvas.width = cropCanvas.height = 256;
   cropCanvas.getContext("2d").drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 256, 256);
-  return { ...(await model.predict(cropCanvas, {region: "full", preview})), detection, detections, mode: "detect" };
+
+  if (pipeline() === "coco") {
+    preview.getContext("2d").drawImage(cropCanvas, 0, 0, preview.width, preview.height);
+    const others = detections.filter(d => d !== detection).sort((a, b) => b.score - a.score);
+    return { mode: "coco", detection, detections, stats: null,
+             result: { label: detection.class, confidence: detection.score, bin: detection.bin,
+                       alternatives: others.map(d => ({ label: d.class, confidence: d.score, bin: d.bin })) } };
+  }
+  return classify(cropCanvas, "full", "detect", detection, detections);
 }
 
 // Maps a rectangle in camera-frame pixels to the displayed video (object-fit: contain).
@@ -200,7 +259,8 @@ function videoToScreen(video) {
   return { scale, ox: (cw - vw * scale) / 2, oy: (ch - vh * scale) / 2 };
 }
 
-function drawDetections(detections = [], primary = null, material = null) {
+// Boxes are drawn in the colour of their bin; the chosen object gets a thicker box and its bin name.
+function drawDetections(detections = [], primary = null, result = null) {
   const video = $("camera"), canvas = $("detectionOverlay");
   const dpr = window.devicePixelRatio || 1;
   canvas.width = video.clientWidth * dpr; canvas.height = video.clientHeight * dpr;
@@ -212,23 +272,58 @@ function drawDetections(detections = [], primary = null, material = null) {
   ctx.font = "600 13px system-ui, sans-serif"; ctx.textBaseline = "top";
   for (const d of detections) {
     const [x, y, w, h] = d.bbox.map(v => v * scale), isPrimary = d === primary;
-    ctx.lineWidth = isPrimary ? 3 : 1.5;
-    ctx.strokeStyle = isPrimary ? "#19e28a" : "#ffffffaa";
+    // In hybrid mode the classifier's material decides the bin of the chosen object.
+    const bin = isPrimary && result ? result.bin : d.bin, info = BINS[bin];
+    ctx.lineWidth = isPrimary ? 4 : 2;
+    ctx.strokeStyle = info?.colour ?? "#ffffff";
     ctx.strokeRect(ox + x, oy + y, w, h);
-    const text = `${d.class} ${(d.score * 100).toFixed(0)}%` +
-                 (isPrimary && material ? ` → ${material.className} ${(material.probability * 100).toFixed(0)}%` : "");
+    let text = `${d.class} ${(d.score * 100).toFixed(0)}%`;
+    if (isPrimary && result && result.label !== d.class) text += ` → ${result.label}`;
+    if (isPrimary) text += ` → ${info ? info.name : "no bin rule"}`;
     const tw = ctx.measureText(text).width + 10, ty = Math.max(oy + y - 20, 0);
-    ctx.fillStyle = isPrimary ? "#0d6b44ee" : "#071723cc";
+    ctx.fillStyle = info?.colour ?? "#071723";
     ctx.fillRect(ox + x, ty, tw, 19);
-    ctx.fillStyle = "white"; ctx.fillText(text, ox + x + 5, ty + 3);
+    ctx.fillStyle = info?.text ?? "#ffffff"; ctx.fillText(text, ox + x + 5, ty + 3);
   }
 }
 
 function describeDetection({mode, detection, detections}) {
   if (mode === "classify") return "Not used";
   if (mode === "waiting") return "Waiting for camera…";
-  if (mode === "detect") return `${detection.class} ${(detection.score * 100).toFixed(0)}%` + (detections.length > 1 ? ` (+${detections.length - 1} more)` : "");
+  if (mode === "coco" || mode === "detect")
+    return `${detection.class} ${(detection.score * 100).toFixed(0)}%` + (detections.length > 1 ? ` (+${detections.length - 1} more)` : "");
   return mode === "fallback" ? "Nothing (classified centre)" : "Nothing detected";
+}
+
+// ---------- Bin mapping editor ----------
+function renderBinMapping() {
+  const options = [...Object.entries(BINS).map(([k, b]) => [k, b.name]), ["ignore", "Ignore (not the item)"]];
+  const rows = Object.keys(DEFAULT_COCO_BINS).sort().map(label => {
+    const tr = document.createElement("tr"), name = document.createElement("td"), cell = document.createElement("td");
+    const select = document.createElement("select");
+    for (const [k, text] of options) select.add(new Option(text, k));
+    select.value = cocoBin(label);
+    select.className = `bin-select bin-${select.value}`;
+    select.setAttribute("aria-label", `Bin for ${label}`);
+    select.addEventListener("change", () => {
+      if (select.value === DEFAULT_COCO_BINS[label]) delete binOverrides[label]; else binOverrides[label] = select.value;
+      select.className = `bin-select bin-${select.value}`;
+      tr.classList.toggle("changed", label in binOverrides);
+      try { localStorage.setItem(BIN_MAP_KEY, JSON.stringify(binOverrides)); } catch {}
+      log(`Bin rule changed: ${label} → ${select.value === "ignore" ? "ignored" : BINS[select.value].name}.`);
+    });
+    name.textContent = label; cell.append(select); tr.append(name, cell);
+    tr.classList.toggle("changed", label in binOverrides);
+    return tr;
+  });
+  $("binMappingRows").replaceChildren(...rows);
+}
+
+function resetBinMapping() {
+  binOverrides = {};
+  try { localStorage.removeItem(BIN_MAP_KEY); } catch {}
+  renderBinMapping();
+  log("Bin rules reset to the defaults in bins.js.");
 }
 
 // ---------- Compute backend ----------
@@ -287,14 +382,15 @@ function showInputStats(stats) {
   }
 }
 
-// Runs the bundled model on reference images and compares with results from a known-good backend.
+// Runs the loaded models on reference images and compares with results from a known-good backend.
 async function runSelfTest() {
   const key = $("modelSource").value;
-  if (!BUNDLED_MODELS[key]) { log("Self-test is available for the bundled models only.", "warn"); return; }
+  const testClassifier = needsClassifier();
+  if (testClassifier && !BUNDLED_MODELS[key]) { log("The classifier self-test is available for the bundled models only.", "warn"); return; }
   $("selfTestButton").disabled = true;
   try {
     await loadPipeline();
-    const all = await (await fetch(SELFTEST_DIR + "expected.json")).json(), expected = all[key];
+    const all = await (await fetch(SELFTEST_DIR + "expected.json")).json(), expected = testClassifier ? all[key] : {};
     let passed = 0, total = Object.keys(expected).length;
     if (detector) {
       for (const [file, ref] of Object.entries(all.detector)) {
@@ -340,11 +436,11 @@ async function classifyPhoto() {
     canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
     const frame = await analyseFrame(canvas);
     setText("detectedStatus", describeDetection(frame));
-    if (!frame.predictions) { showNoItem(); log(`Photo ${file.name}: no object detected.`, "warn"); return; }
-    const {sorted} = showPredictions(frame.predictions);
-    showInputStats(frame.stats);
-    const found = frame.detection ? `detected ${frame.detection.class} ${(frame.detection.score * 100).toFixed(0)}% → ` : "";
-    log(`Photo ${file.name}: ${found}` + sorted.slice(0, 3).map(p => `${p.className} ${(p.probability * 100).toFixed(1)}%`).join(", "));
+    if (!frame.result) { showNoItem(); log(`Photo ${file.name}: no object detected.`, "warn"); return; }
+    showResult(frame.result);
+    if (frame.stats) showInputStats(frame.stats); else setText("inputStats", "Crop of the detected object.");
+    const r = frame.result, found = frame.mode === "detect" ? `detected ${frame.detection.class} → ` : "";
+    log(`Photo ${file.name}: ${found}${r.label} ${(r.confidence * 100).toFixed(1)}% → ${BINS[r.bin]?.name ?? "no bin rule"}`);
   } catch (error) { log(`Photo classification failed: ${error.message}`, "error"); }
   finally { $("photoInput").value = ""; }
 }
@@ -460,8 +556,9 @@ async function loadModel() {
 }
 
 // Loads whatever the chosen pipeline needs: the material classifier, plus the detector in hybrid mode.
+// The classifier is only loaded when the pipeline uses it (not in the default COCO → bin mode).
 async function loadPipeline() {
-  if (!model) await loadModel();
+  if (needsClassifier() && !model) await loadModel();
   if (usesDetection() && !detector) {
     try { await loadDetector(); }
     catch (error) { setText("detectedStatus", "Detector failed"); throw new Error(`Detector load failed: ${error.message}`); }
@@ -476,6 +573,7 @@ async function loadModelButton() {
 
 function pipelineChanged() {
   $("detectionFields").hidden = !usesDetection();
+  $("classifierFields").hidden = !needsClassifier();
   if (!usesDetection()) { drawDetections(); setText("detectedStatus", "Not used"); }
   else if (!detector) setText("detectedStatus", "—");
   updateRegionGuide();
@@ -566,46 +664,60 @@ function stopAll() {
   if (wasActive) log("Camera stopped.");
 }
 
-// ---------- Classification ----------
-function showPredictions(predictions) {
-  const sorted = [...predictions].sort((a,b)=>b.probability-a.probability);
-  const top = sorted[0];
-  setText("className", top.className);
-  setText("confidenceText", `${(top.probability*100).toFixed(1)}%`);
-  $("confidenceBar").style.width = `${top.probability*100}%`;
-  $("predictions").replaceChildren(...sorted.slice(0,5).map(p => {
+// ---------- Result display ----------
+function showBin(bin) {
+  const badge = $("binBadge"), info = BINS[bin];
+  badge.style.background = info?.colour ?? "#dce6eb";
+  badge.style.color = info?.text ?? "#163247";
+  badge.querySelector("strong").textContent = info ? info.name : "No bin rule";
+  badge.querySelector("span").textContent = info ? info.description : "This label is not in the bin mapping.";
+}
+
+// Shows the bin, the label that decided it, and the runners-up (other objects, or other classifier classes).
+function showResult(result) {
+  showBin(result.bin);
+  setText("className", result.label);
+  setText("confidenceText", `${(result.confidence*100).toFixed(1)}%`);
+  $("confidenceBar").style.width = `${result.confidence*100}%`;
+  $("predictions").replaceChildren(...result.alternatives.slice(0,4).map(p => {
     const row=document.createElement("div"); row.className="prediction";
     const a=document.createElement("span"), b=document.createElement("span");
-    a.textContent=p.className; b.textContent=`${(p.probability*100).toFixed(1)}%`; row.append(a,b); return row;
+    a.textContent=`${p.label}${p.bin ? ` · ${BINS[p.bin].name}` : ""}`; b.textContent=`${(p.confidence*100).toFixed(1)}%`;
+    row.append(a,b); return row;
   }));
-  return {top, sorted};
 }
 
 // Nothing detected: show "No item" and restart the stable-frame count, so nothing is published.
 function showNoItem() {
-  setText("className", "No item"); setText("confidenceText", "—");
+  const badge = $("binBadge");
+  badge.style.background = "#dce6eb"; badge.style.color = "#163247";
+  badge.querySelector("strong").textContent = "No item";
+  badge.querySelector("span").textContent = "Hold one item in front of the camera.";
+  setText("className", "—"); setText("confidenceText", "—");
   $("confidenceBar").style.width = "0"; $("predictions").replaceChildren();
   candidate = ""; candidateFrames = 0;
 }
 
-function updateStability(label) {
-  if (label === candidate) candidateFrames += 1;
-  else { candidate = label; candidateFrames = 1; }
+function updateStability(key) {
+  if (key === candidate) candidateFrames += 1;
+  else { candidate = key; candidateFrames = 1; }
 }
 
 // frame = result of analyseFrame (null for manual tests). The bounding box is normalised to 0-1 of the frame.
-function buildPayload(top, sorted, inferenceMs, source="camera", frame=null) {
-  const modelUrl = model?.source ?? null;
+function buildPayload(result, inferenceMs, source="camera", frame=null) {
   const d = frame?.detection, [fw, fh] = d ? sourceSize($("camera")) : [1, 1];
+  const round = v => Number(v.toFixed(4));
   return {
-    schema_version:1, message_type:"waste_classification", device_id:value("deviceId"),
+    schema_version:2, message_type:"waste_classification", device_id:value("deviceId"),
     sequence:++sequence, timestamp:new Date().toISOString(), source,
     pipeline: frame?.mode ?? null,
-    classification:top.className, confidence:Number(top.probability.toFixed(4)),
-    detected_object: d ? { label:d.class, confidence:Number(d.score.toFixed(4)),
-      bbox: [d.bbox[0]/fw, d.bbox[1]/fh, d.bbox[2]/fw, d.bbox[3]/fh].map(v => Number(v.toFixed(4))) } : null,
-    inference_ms:Math.round(inferenceMs), model_url:modelUrl,
-    alternatives:sorted.slice(1,3).map(p=>({label:p.className, confidence:Number(p.probability.toFixed(4))}))
+    bin: result.bin ?? null, bin_description: BINS[result.bin]?.description ?? null,
+    classification:result.label, confidence:round(result.confidence),
+    detected_object: d ? { label:d.class, confidence:round(d.score),
+      bbox: [d.bbox[0]/fw, d.bbox[1]/fh, d.bbox[2]/fw, d.bbox[3]/fh].map(round) } : null,
+    inference_ms:Math.round(inferenceMs),
+    model: frame?.mode === "coco" ? "coco-ssd-lite" : (model?.source ?? null),
+    alternatives:result.alternatives.slice(0,2).map(p=>({label:p.label, confidence:round(p.confidence), bin:p.bin ?? null}))
   };
 }
 
@@ -622,19 +734,21 @@ function publishText(text, description) {
 }
 
 function publishPayload(payload) {
-  return publishText(JSON.stringify(payload), `${payload.classification} (${(payload.confidence*100).toFixed(1)}%)`);
+  const bin = BINS[payload.bin]?.name ?? "no bin";
+  return publishText(JSON.stringify(payload), `${payload.classification} → ${bin} (${(payload.confidence*100).toFixed(1)}%)`);
 }
 
-function considerPublish(top, sorted, inferenceMs, frame) {
+// Publishes when the same label and bin are seen for enough frames with enough confidence.
+function considerPublish(result, inferenceMs, frame) {
   const threshold=Number(value("threshold")), required=Number(value("stableFrames")), cooldown=Number(value("cooldown"));
-  updateStability(top.className);
-  const now=Date.now(), stable=candidateFrames>=required, confident=top.probability>=threshold;
-  const changed=top.className!==lastPublishedClass, cooldownPassed=now-lastPublishedAt>=cooldown;
+  const key=`${result.label}|${result.bin}`;
+  updateStability(key);
+  const now=Date.now(), stable=candidateFrames>=required, confident=result.confidence>=threshold;
+  const changed=key!==lastPublishedClass, cooldownPassed=now-lastPublishedAt>=cooldown;
   if (stable && confident && (changed || cooldownPassed)) {
     // Without MQTT, keep classifying but do not try to publish (and do not flood the log).
     if (!mqttClient?.connected) return;
-    const payload=buildPayload(top,sorted,inferenceMs,"camera",frame);
-    if (publishPayload(payload)) { lastPublishedClass=top.className; lastPublishedAt=now; candidateFrames=0; }
+    if (publishPayload(buildPayload(result,inferenceMs,"camera",frame))) { lastPublishedClass=key; lastPublishedAt=now; candidateFrames=0; }
   }
 }
 
@@ -646,11 +760,11 @@ async function inferenceLoop() {
     const elapsed=performance.now()-start;
     setText("inferenceTime", `${Math.round(elapsed)} ms`);
     setText("detectedStatus", describeDetection(frame));
-    if (frame.predictions) {
-      showInputStats(frame.stats);
-      const {top,sorted}=showPredictions(frame.predictions);
-      drawDetections(frame.detections, frame.detection, top);
-      considerPublish(top,sorted,elapsed,frame);
+    if (frame.result) {
+      if (frame.stats) showInputStats(frame.stats); else setText("inputStats", "Crop of the detected object.");
+      showResult(frame.result);
+      drawDetections(frame.detections, frame.detection, frame.result);
+      considerPublish(frame.result,elapsed,frame);
     } else if (frame.mode !== "waiting") {
       showNoItem(); drawDetections(frame.detections);
     }
@@ -668,11 +782,12 @@ async function inferenceLoop() {
 
 async function start() {
   if (running) return;
-  $("startButton").disabled=true; setOverall(model && (detector || !usesDetection()) ? "Starting…" : "Loading models…", "warn");
+  const ready = (!needsClassifier() || model) && (!usesDetection() || detector);
+  $("startButton").disabled=true; setOverall(ready ? "Starting…" : "Loading models…", "warn");
   try {
     await loadPipeline();
-    await startCamera(); running=true; setOverall("Classifying", "ok");
-    if (!mqttClient?.connected) log("Classifying without MQTT: results will not be published until MQTT connects.", "warn");
+    await startCamera(); running=true; setOverall("Running", "ok");
+    if (!mqttClient?.connected) log("Running without MQTT: results will not be published until MQTT connects.", "warn");
     inferenceLoop();
   } catch (error) { log(error.message,"error"); setOverall("Start failed","bad"); $("startButton").disabled=false; }
 }
@@ -784,8 +899,7 @@ function clearReceived() {
 function publishTest() {
   const text = $("testMessage").value.trim();
   if (!text) {
-    const top={className:"TEST_ONLY",probability:1};
-    publishPayload(buildPayload(top,[top],0,"manual_test"));
+    publishPayload(buildPayload({label:"TEST_ONLY", confidence:1, bin:null, alternatives:[]}, 0, "manual_test"));
     return;
   }
   publishText(text, "custom test message");
@@ -799,7 +913,8 @@ $("modelFiles").addEventListener("change",()=>{showSelectedFiles(); modelSetting
 $("modelUrl").addEventListener("change",modelSettingsChanged);
 $("backend").addEventListener("change",backendChanged);
 $("pipeline").addEventListener("change",pipelineChanged);
-$("fallback").addEventListener("change",updateRegionGuide);
+$("fallback").addEventListener("change",pipelineChanged);
+$("resetBinsButton").addEventListener("click",resetBinMapping);
 $("region").addEventListener("change",updateRegionGuide);
 $("camera").addEventListener("loadedmetadata",updateRegionGuide);
 $("camera").addEventListener("resize",updateRegionGuide);   // fires when the phone rotates
@@ -811,6 +926,7 @@ $("cameraTestButton").addEventListener("click",testCamera);
 $("stopButton").addEventListener("click",stopAll);
 $("mqttButton").addEventListener("click",connectMqtt);
 $("saveButton").addEventListener("click",saveSettings);
+$("rememberPassword").addEventListener("change",rememberPasswordChanged);
 $("testButton").addEventListener("click",publishTest);
 $("subscribeButton").addEventListener("click",toggleSubscribe);
 $("clearReceivedButton").addEventListener("click",clearReceived);
@@ -823,4 +939,5 @@ window.addEventListener("pagehide",()=>{stopAll(); if(mqttClient)mqttClient.end(
 loadSettings();
 updateModelSourceUi();
 pipelineChanged();
+renderBinMapping();
 log("App ready. Test the camera and MQTT independently, or configure a model URL and start classifying.");
