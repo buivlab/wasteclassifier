@@ -104,6 +104,9 @@ The page must be served over HTTPS for camera access. Opening `index.html` direc
 6. Tap **Connect MQTT**, then **Publish test message**. Confirm it in the HiveMQ WebSocket client.
 7. Tap **Start camera & model** and grant camera permission.
 8. Present an item steadily and confirm that stable, confident classifications are published.
+9. For a display tablet, tap **Tablet mode** in the header. Only the title, the video and the bin result stay on screen, and the page goes full screen where the browser allows it. In landscape, the video and result sit side by side. While stopped, a large **Start** button remains. The setting is remembered on the device; tap **Exit tablet mode** to see the settings again.
+
+Buttons show whether they can be used: clickable buttons are solid and raised; unavailable ones are grey and dashed, with the reason written on them (for example *Publish test message · connect MQTT first*).
 
 ## JSON example
 

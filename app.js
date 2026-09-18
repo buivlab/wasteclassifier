@@ -7,6 +7,7 @@ const PASSWORD_KEY = "prog6002-mqtt-password";   // only written when "Remember 
 let model = null, stream = null, running = false, mqttClient = null, subscribedTopic = "";
 let candidate = "", candidateFrames = 0, lastPublishedClass = "", lastPublishedAt = 0;
 let sequence = 0, published = 0, received = 0, errorCount = 0, animationId = null, inferenceErrors = 0;
+const busy = { starting: false, camera: false, loading: false, selfTest: false };
 
 // ---------- Event / error log ----------
 function log(message, level="info") {
@@ -36,6 +37,44 @@ function clearLog() {
 }
 
 function setText(id, value) { $(id).textContent = value; }
+
+// ---------- Button states ----------
+// A disabled button shows why (data-reason is displayed on the button by CSS), which also works on touchscreens.
+function setEnabled(id, enabled, reason) {
+  const el = $(id);
+  el.disabled = !enabled;
+  if (enabled) { delete el.dataset.reason; el.removeAttribute("title"); }
+  else { el.dataset.reason = reason; el.title = reason; }
+}
+
+function updateControls() {
+  const mqttOn = Boolean(mqttClient?.connected), cameraOn = Boolean(stream);
+  setEnabled("startButton", !running && !busy.starting, busy.starting ? "starting…" : "running");
+  setEnabled("stopButton", running || cameraOn, "nothing running");
+  setEnabled("cameraTestButton", !cameraOn && !busy.camera && !busy.starting, busy.camera ? "starting…" : "camera is on");
+  setEnabled("loadModelButton", !running && !busy.loading && !busy.starting, running ? "stop first" : "loading…");
+  setEnabled("selfTestButton", !running && !busy.selfTest && !busy.starting, running ? "stop first" : "testing…");
+  setEnabled("testButton", mqttOn, "connect MQTT first");
+  setEnabled("subscribeButton", mqttOn, "connect MQTT first");
+  document.body.classList.toggle("is-running", running);
+}
+
+// ---------- Tablet mode ----------
+// Shows only the title, video and result; everything else is hidden. Remembered on this device.
+const TABLET_MODE_KEY = "prog6002-tablet-mode";
+
+function setTabletMode(on, {fullscreen = true} = {}) {
+  document.body.classList.toggle("tablet-mode", on);
+  $("tabletToggle").textContent = on ? "Exit tablet mode" : "Tablet mode";
+  $("tabletToggle").setAttribute("aria-pressed", String(on));
+  try { localStorage.setItem(TABLET_MODE_KEY, on ? "1" : "0"); } catch {}
+  // Full screen needs a tap, so it is only requested when the user presses the button.
+  if (fullscreen) {
+    if (on && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    if (!on && document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  }
+  requestAnimationFrame(() => { updateRegionGuide(); drawDetections(); });
+}
 function setOverall(text, kind="warn") { const el=$("overallStatus"); el.textContent=text; el.className=`pill ${kind}`; }
 function value(id) { return $(id).value.trim(); }
 
@@ -429,7 +468,7 @@ async function runSelfTest() {
   const testClassifier = needsClassifier() && Boolean(BUNDLED_MODELS[key]);
   if (needsClassifier() && !testClassifier) log("Classifier self-test skipped: it is available for the bundled models only.", "warn");
   if (!testClassifier && !usesDetection()) return;
-  $("selfTestButton").disabled = true;
+  busy.selfTest = true; updateControls();
   try {
     await loadPipeline();
     const all = await (await fetch(SELFTEST_DIR + "expected.json")).json(), expected = testClassifier ? all[key] : {};
@@ -459,7 +498,7 @@ async function runSelfTest() {
     else log(`Self-test FAILED ${total - passed}/${total} on ${info}. This backend gives wrong results on this device; ` +
              "choose WebAssembly under Compute backend and re-test.", "error");
   } catch (error) { log(`Self-test error: ${error.message}`, "error"); }
-  finally { $("selfTestButton").disabled = false; }
+  finally { busy.selfTest = false; updateControls(); }
 }
 
 // Classifies a still photo (from the gallery or the phone's camera app) without the live video path.
@@ -611,9 +650,9 @@ async function loadPipeline() {
 }
 
 async function loadModelButton() {
-  $("loadModelButton").disabled = true;
+  busy.loading = true; updateControls();
   try { await loadPipeline(); } catch (error) { log(error.message, "error"); }
-  finally { $("loadModelButton").disabled = false; }
+  finally { busy.loading = false; updateControls(); }
 }
 
 function pipelineChanged() {
@@ -681,17 +720,17 @@ async function startCamera() {
   const settings = stream.getVideoTracks()[0]?.getSettings() || {};
   setText("cameraStatus", `Running${settings.width ? ` (${settings.width}×${settings.height})` : ""}`);
   log(`Camera started${settings.width ? ` at ${settings.width}×${settings.height}` : ""}.`);
-  $("stopButton").disabled = false;
+  updateControls();
 }
 
 async function testCamera() {
   if (stream) { log("Camera is already running."); return; }
-  $("cameraTestButton").disabled = true;
+  busy.camera = true; updateControls();
   try {
     await startCamera();
     setOverall("Camera test", "ok");
   } catch (error) { log(error.message, "error"); setOverall("Camera failed", "bad"); }
-  finally { $("cameraTestButton").disabled = false; }
+  finally { busy.camera = false; updateControls(); }
 }
 
 function stopAll() {
@@ -703,9 +742,10 @@ function stopAll() {
   $("camera").srcObject = null;
   $("regionGuide").hidden = true;
   drawDetections();
+  showNoItem("—", "Stopped. Tap Start to begin.");   // never leave an old result on screen
   $("cameraMessage").textContent = "Camera stopped";
   $("cameraMessage").classList.remove("hidden");
-  $("startButton").disabled = false; $("stopButton").disabled = true;
+  updateControls();
   setText("cameraStatus", "Stopped");
   setOverall("Stopped", "warn");
   if (wasActive) log("Camera stopped.");
@@ -735,11 +775,11 @@ function showResult(result) {
 }
 
 // Nothing detected: show "No item" and restart the stable-frame count, so nothing is published.
-function showNoItem() {
+function showNoItem(title = "No item", hint = "Hold one item in front of the camera.") {
   const badge = $("binBadge");
   badge.style.background = "#dce6eb"; badge.style.color = "#163247";
-  badge.querySelector("strong").textContent = "No item";
-  badge.querySelector("span").textContent = "Hold one item in front of the camera.";
+  badge.querySelector("strong").textContent = title;
+  badge.querySelector("span").textContent = hint;
   setText("className", "—"); setText("confidenceText", "—");
   $("confidenceBar").style.width = "0"; $("predictions").replaceChildren();
   candidate = ""; candidateFrames = 0;
@@ -830,13 +870,14 @@ async function inferenceLoop() {
 async function start() {
   if (running) return;
   const ready = (!needsClassifier() || model) && (!usesDetection() || detector);
-  $("startButton").disabled=true; setOverall(ready ? "Starting…" : "Loading models…", "warn");
+  busy.starting=true; updateControls(); setOverall(ready ? "Starting…" : "Loading models…", "warn");
   try {
     await loadPipeline();
     await startCamera(); running=true; setOverall("Running", "ok");
     if (!mqttClient?.connected) log("Running without MQTT: results will not be published until MQTT connects.", "warn");
     inferenceLoop();
-  } catch (error) { log(error.message,"error"); setOverall("Start failed","bad"); $("startButton").disabled=false; }
+  } catch (error) { log(error.message,"error"); setOverall("Start failed","bad"); }
+  finally { busy.starting=false; updateControls(); }
 }
 
 // ---------- MQTT ----------
@@ -856,10 +897,7 @@ function normalizeBrokerUrl(raw) {
   return url;
 }
 
-function setMqttButtons(connected) {
-  $("testButton").disabled = !connected;
-  $("subscribeButton").disabled = !connected;
-}
+function setMqttButtons() { updateControls(); }
 
 function updateSubscribeUi() {
   $("subscribeButton").textContent = subscribedTopic ? "Unsubscribe" : "Subscribe";
@@ -973,6 +1011,7 @@ $("cameraTestButton").addEventListener("click",testCamera);
 $("stopButton").addEventListener("click",stopAll);
 $("mqttButton").addEventListener("click",connectMqtt);
 $("saveButton").addEventListener("click",saveSettings);
+$("tabletToggle").addEventListener("click",()=>setTabletMode(!document.body.classList.contains("tablet-mode")));
 $("rememberPassword").addEventListener("change",rememberPasswordChanged);
 $("testButton").addEventListener("click",publishTest);
 $("subscribeButton").addEventListener("click",toggleSubscribe);
@@ -986,5 +1025,7 @@ window.addEventListener("pagehide",()=>{stopAll(); if(mqttClient)mqttClient.end(
 loadSettings();
 updateModelSourceUi();
 pipelineChanged();
+updateControls();
+try { if (localStorage.getItem(TABLET_MODE_KEY) === "1") setTabletMode(true, {fullscreen: false}); } catch {}
 renderBinMapping();
 log("App ready. Test the camera and MQTT independently, or configure a model URL and start classifying.");
