@@ -44,5 +44,7 @@ const LABEL_BINS = {
   recycling: "yellow", recycle: "yellow", recycled: "yellow", recyclable: "yellow", yellow: "yellow",
   landfill: "red", general: "red", rubbish: "red", red: "red",
   organic: "green", organics: "green", food: "green", garden: "green", compost: "green", fogo: "green", green: "green",
-  "e-waste": "ewaste", ewaste: "ewaste", electronics: "ewaste"
+  "e-waste": "ewaste", ewaste: "ewaste", electronics: "ewaste",
+  // Classes meaning "nothing to sort" (e.g. a Teachable Machine background class) -> show "No item"
+  unknown: "ignore", background: "ignore", nothing: "ignore", empty: "ignore", none: "ignore", "no item": "ignore"
 };

@@ -80,7 +80,9 @@ function rememberPasswordChanged() {
 // ---------- Model URL ----------
 function normalizedModelUrl() {
   const raw = value("modelUrl");
-  if (!/^https:\/\//i.test(raw)) throw new Error("Model URL must start with https://");
+  if (!raw) throw new Error("Enter your Teachable Machine model URL under Image classifier.");
+  // https is required on a real host; http://localhost is allowed for local testing.
+  if (!/^https:\/\//i.test(raw) && !/^http:\/\/(localhost|127\.0\.0\.1)[:/]/i.test(raw)) throw new Error("Model URL must start with https://");
   return raw.endsWith("/") ? raw : raw + "/";
 }
 
@@ -91,11 +93,18 @@ function normalizedModelUrl() {
 async function loadTeachableMachineUrl() {
   const base = normalizedModelUrl();
   const tm = await tmImage.load(base + "model.json", base + "metadata.json");
-  // Teachable Machine does its own centre-crop; region and preview are not supported.
-  return { predict: async (src) => ({ predictions: await tm.predict(src, false), stats: null }),
-           getTotalClasses: () => tm.getTotalClasses(),
-           dispose: () => tm.dispose?.(), source: base,
-           description: `Teachable Machine model with ${tm.getTotalClasses()} classes` };
+  const labels = tm.getClassLabels();
+  // The chosen region is copied to a canvas first, so the target box and preview work as for other models.
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 224;
+  async function predict(src, {region = "square", preview = null} = {}) {
+    const [w, h] = sourceSize(src), r = regionRect(w, h, region);
+    canvas.getContext("2d").drawImage(src, r.x, r.y, r.w, r.h, 0, 0, canvas.width, canvas.height);
+    if (preview) preview.getContext("2d").drawImage(canvas, 0, 0, preview.width, preview.height);
+    return { predictions: await tm.predict(canvas, false), stats: null };
+  }
+  return { predict, labels, getTotalClasses: () => labels.length, dispose: () => tm.dispose?.(), source: base,
+           description: `Teachable Machine model with ${labels.length} classes (${labels.join(", ")})` };
 }
 
 function readFileText(file) { return file.text(); }
@@ -161,16 +170,26 @@ const BIN_MAP_KEY = "prog6002-bin-map";
 let binOverrides = {};
 try { binOverrides = JSON.parse(localStorage.getItem(BIN_MAP_KEY) || "{}"); } catch {}
 
-function cocoBin(label) { return binOverrides[label] ?? DEFAULT_COCO_BINS[label] ?? "ignore"; }
-
-// Bin for any label: a COCO object, a material (bundled classifiers) or a custom model class name.
-function binFor(label) {
+// Default rule for a label, before any in-app edits:
+// "red" | "yellow" | "green" | "ewaste" | "ignore" (means "no item") | null (no rule).
+function defaultRule(label) {
   const key = String(label).trim().toLowerCase();
-  if (key in DEFAULT_COCO_BINS) { const b = cocoBin(key); return b === "ignore" ? null : b; }
+  if (key in DEFAULT_COCO_BINS) return DEFAULT_COCO_BINS[key];
   if (LABEL_BINS[key]) return LABEL_BINS[key];
-  const word = Object.keys(LABEL_BINS).find(w => key.includes(w));   // e.g. "yellow bin", "food scraps"
+  // Match whole words, e.g. "Yellow bin" -> yellow, "food scraps" -> green, "shredded paper" -> yellow.
+  const word = key.split(/[^a-z-]+/).find(w => LABEL_BINS[w]);
   return word ? LABEL_BINS[word] : null;
 }
+
+function ruleFor(label) {
+  const key = String(label).trim().toLowerCase();
+  return key in binOverrides ? binOverrides[key] : defaultRule(key);
+}
+
+function cocoBin(label) { return ruleFor(label) ?? "ignore"; }
+
+// Bin shown for a label; null when the label has no bin (no rule, or "ignore").
+function binFor(label) { const rule = ruleFor(label); return rule === "ignore" ? null : rule; }
 
 // ---------- Object detection ----------
 // COCO-SSD finds everyday objects (80 COCO classes). In "coco" mode the object's own label decides the bin;
@@ -209,8 +228,10 @@ function squareAround([x, y, w, h], frameW, frameH) {
 }
 
 // Turns classifier predictions into a result: top label, its bin, and the runners-up.
+// Returns null when the top class is mapped to "no item" (for example a Teachable Machine "unknown" class).
 function classifierResult(predictions) {
   const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
+  if (ruleFor(sorted[0].className) === "ignore") return null;
   return { label: sorted[0].className, confidence: sorted[0].probability, bin: binFor(sorted[0].className),
            alternatives: sorted.slice(1, 5).map(p => ({ label: p.className, confidence: p.probability, bin: binFor(p.className) })) };
 }
@@ -226,7 +247,8 @@ async function analyseFrame(src) {
   if (!fw || !fh || (src instanceof HTMLVideoElement && src.readyState < 2)) return { mode: "waiting", result: null, detections: [] };
   const classify = async (source, reg, mode, detection = null, detections = []) => {
     const {predictions, stats} = await model.predict(source, {region: reg, preview});
-    return { mode, result: classifierResult(predictions), detection, detections, stats };
+    const result = classifierResult(predictions);
+    return { mode: result ? mode : "none", result, detection, detections, stats };
   };
   if (!usesDetection()) return classify(src, region, "classify");
 
@@ -296,26 +318,45 @@ function describeDetection({mode, detection, detections}) {
 }
 
 // ---------- Bin mapping editor ----------
-function renderBinMapping() {
-  const options = [...Object.entries(BINS).map(([k, b]) => [k, b.name]), ["ignore", "Ignore (not the item)"]];
-  const rows = Object.keys(DEFAULT_COCO_BINS).sort().map(label => {
-    const tr = document.createElement("tr"), name = document.createElement("td"), cell = document.createElement("td");
-    const select = document.createElement("select");
-    for (const [k, text] of options) select.add(new Option(text, k));
-    select.value = cocoBin(label);
-    select.className = `bin-select bin-${select.value}`;
-    select.setAttribute("aria-label", `Bin for ${label}`);
-    select.addEventListener("change", () => {
-      if (select.value === DEFAULT_COCO_BINS[label]) delete binOverrides[label]; else binOverrides[label] = select.value;
-      select.className = `bin-select bin-${select.value}`;
-      tr.classList.toggle("changed", label in binOverrides);
-      try { localStorage.setItem(BIN_MAP_KEY, JSON.stringify(binOverrides)); } catch {}
-      log(`Bin rule changed: ${label} → ${select.value === "ignore" ? "ignored" : BINS[select.value].name}.`);
-    });
-    name.textContent = label; cell.append(select); tr.append(name, cell);
-    tr.classList.toggle("changed", label in binOverrides);
-    return tr;
+// Lists the COCO objects (when detection is used) and the loaded classifier's classes (when it is used).
+function binMappingRow(label, allowNoRule) {
+  const key = label.toLowerCase();
+  const options = [...Object.entries(BINS).map(([k, b]) => [k, b.name]), ["ignore", allowNoRule ? "No item (e.g. unknown/background)" : "Ignore (not the item)"]];
+  if (allowNoRule) options.push(["", "No bin rule"]);
+  const tr = document.createElement("tr"), name = document.createElement("td"), cell = document.createElement("td");
+  const select = document.createElement("select");
+  for (const [k, text] of options) select.add(new Option(text, k));
+  const show = () => { select.value = ruleFor(key) ?? ""; select.className = `bin-select bin-${select.value || "none"}`;
+                       tr.classList.toggle("changed", key in binOverrides); };
+  select.setAttribute("aria-label", `Bin for ${label}`);
+  select.addEventListener("change", () => {
+    const rule = select.value || null;
+    if (rule === defaultRule(key)) delete binOverrides[key]; else binOverrides[key] = rule;
+    try { localStorage.setItem(BIN_MAP_KEY, JSON.stringify(binOverrides)); } catch {}
+    show();
+    log(`Bin rule changed: ${label} → ${rule === "ignore" ? (allowNoRule ? "no item" : "ignored") : BINS[rule]?.name ?? "no bin rule"}.`);
   });
+  name.textContent = label; cell.append(select); tr.append(name, cell); show();
+  return tr;
+}
+
+function binMappingHeading(text) {
+  const tr = document.createElement("tr"), th = document.createElement("th");
+  th.colSpan = 2; th.textContent = text; th.className = "group"; tr.append(th);
+  return tr;
+}
+
+function renderBinMapping() {
+  const rows = [];
+  if (needsClassifier()) {
+    const labels = model?.labels ?? [];
+    rows.push(binMappingHeading(`Image classifier classes${labels.length ? "" : " (load the model to list them)"}`));
+    labels.forEach(label => rows.push(binMappingRow(label, true)));
+  }
+  if (usesDetection()) {
+    rows.push(binMappingHeading("COCO objects"));
+    Object.keys(DEFAULT_COCO_BINS).sort().forEach(label => rows.push(binMappingRow(label, false)));
+  }
   $("binMappingRows").replaceChildren(...rows);
 }
 
@@ -385,8 +426,9 @@ function showInputStats(stats) {
 // Runs the loaded models on reference images and compares with results from a known-good backend.
 async function runSelfTest() {
   const key = $("modelSource").value;
-  const testClassifier = needsClassifier();
-  if (testClassifier && !BUNDLED_MODELS[key]) { log("The classifier self-test is available for the bundled models only.", "warn"); return; }
+  const testClassifier = needsClassifier() && Boolean(BUNDLED_MODELS[key]);
+  if (needsClassifier() && !testClassifier) log("Classifier self-test skipped: it is available for the bundled models only.", "warn");
+  if (!testClassifier && !usesDetection()) return;
   $("selfTestButton").disabled = true;
   try {
     await loadPipeline();
@@ -529,7 +571,7 @@ function wrapTfjsModel(net, {labels, normalization, source, name}) {
   // Warm up once so the first real frame is not slow.
   tf.tidy(() => { net.predict(tf.zeros([1, height, width, channels])); });
 
-  return { predict, getTotalClasses: () => labels.length, dispose: () => net.dispose(), source,
+  return { predict, labels, getTotalClasses: () => labels.length, dispose: () => net.dispose(), source,
            description: `${name}: input ${width}×${height}×${channels}, ${labels.length} classes ` +
                         `(${labels.join(", ")}), ${normalization} normalisation` };
 }
@@ -552,6 +594,9 @@ async function loadModel() {
   }
   setText("modelStatus", `${model.getTotalClasses()} classes loaded`);
   log(`Model loaded: ${model.description}.`);
+  renderBinMapping();
+  const unmapped = (model.labels ?? []).filter(l => ruleFor(l) === null);
+  if (unmapped.length) log(`No bin rule for: ${unmapped.join(", ")}. Set their bins under “Bin mapping”.`, "warn");
   $("className").textContent = "—"; $("predictions").replaceChildren();
 }
 
@@ -574,6 +619,7 @@ async function loadModelButton() {
 function pipelineChanged() {
   $("detectionFields").hidden = !usesDetection();
   $("classifierFields").hidden = !needsClassifier();
+  renderBinMapping();
   if (!usesDetection()) { drawDetections(); setText("detectedStatus", "Not used"); }
   else if (!detector) setText("detectedStatus", "—");
   updateRegionGuide();
@@ -601,6 +647,7 @@ function modelSettingsChanged() {
   if (!model || running) return;
   model.dispose?.(); model = null;
   setText("modelStatus", "Not loaded");
+  renderBinMapping();
   log("Model settings changed; the model will be reloaded on next start.");
 }
 

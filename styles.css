@@ -84,3 +84,5 @@ input[type=file] { padding:.5rem; background:#f5f8fa; }
 .bin-select { min-height:36px; padding:.3rem .5rem; font-weight:700; }
 .bin-select.bin-red { background:#fde2e0; } .bin-select.bin-yellow { background:#fff4c2; }
 .bin-select.bin-green { background:#dcf5e7; } .bin-select.bin-ewaste { background:#e4e7ec; } .bin-select.bin-ignore { color:#667085; }
+.bin-mapping th.group { position:static; background:#e3edf2; font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; }
+.bin-select.bin-none { background:#fff; color:#b42318; }

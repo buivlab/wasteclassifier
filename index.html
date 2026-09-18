@@ -70,9 +70,8 @@
                 <option value="full">Whole frame</option>
               </select>
             </label>
-            <p class="help">Used when detection is off, or when nothing is detected and the fallback is “centre region”.
-              Only the area inside the dashed box is classified, so the item should fill most of it: a blank background
-              (table, wall) is usually classified as cardboard or paper.</p>
+            <p class="help">Used by the image classifier pipeline (for example your Teachable Machine model), and by the
+              “centre region” fallback. Only the area inside the dashed box is classified, so the item should fill most of it.</p>
             <label>Classify a photo instead of live video
               <input id="photoInput" type="file" accept="image/*">
             </label>
@@ -89,14 +88,14 @@
       <h2>Classifier configuration</h2>
       <label>Pipeline
         <select id="pipeline">
-          <option value="coco" selected>Detect the object, bin from its COCO label (recommended)</option>
-          <option value="hybrid">Detect the object, then classify its material</option>
-          <option value="classify">Classify a fixed region only (no detection)</option>
+          <option value="coco" selected>COCO object detection → bin (no training needed)</option>
+          <option value="classify">Image classifier: your Teachable Machine model (or a bundled model)</option>
+          <option value="hybrid">COCO detection, then the image classifier on the detected object</option>
         </select>
       </label>
       <div id="detectionFields" class="source-fields">
         <p class="help"><strong>COCO-SSD</strong> (Apache-2.0, 9&nbsp;MB) finds everyday objects such as bottles, cups,
-          fruit, books and phones. The largest object's label decides the bin using the table below. People and furniture
+          fruit, books and phones. The largest object's label decides the bin (see <em>Bin mapping</em> below). People and furniture
           are ignored. Items COCO does not know (cans, boxes, crumpled paper, batteries) are not detected.</p>
         <div class="grid two">
           <label>Minimum detection score <input id="detScore" type="number" min="0.1" max="0.95" step="0.05" value="0.4"></label>
@@ -107,25 +106,20 @@
             </select>
           </label>
         </div>
-        <details class="bin-mapping">
-          <summary>Bin mapping: COCO object → bin (editable)</summary>
-          <p class="help">Defaults follow common Australian kerbside rules and are defined in <code>bins.js</code>.
-            Councils differ, so adjust them here; changes are saved on this device and highlighted.</p>
-          <div class="table-wrap"><table><thead><tr><th>Object</th><th>Bin</th></tr></thead>
-            <tbody id="binMappingRows"></tbody></table></div>
-          <div class="actions"><button id="resetBinsButton" class="small">Reset to defaults</button></div>
-        </details>
       </div>
       <div id="classifierFields">
-      <label>Material classifier (model source)
+      <label>Image classifier
         <select id="modelSource">
-          <option value="default" selected>Default: EcoVision MobileNetV3 (bundled, 10 classes)</option>
-          <option value="lite">Lite: TrashNet MobileNetV2 (bundled, fastest, less accurate)</option>
-          <option value="url">Teachable Machine URL (online)</option>
-          <option value="files">Upload model files (runs locally)</option>
+          <option value="url" selected>Teachable Machine model URL</option>
+          <option value="files">Upload model files (Teachable Machine export or TF.js)</option>
+          <option value="default">Bundled: EcoVision MobileNetV3 (10 materials)</option>
+          <option value="lite">Bundled: Lite TrashNet MobileNetV2 (6 materials)</option>
         </select>
       </label>
-      <div id="defaultSourceFields" class="source-fields">
+      <p class="help">Each class is mapped to a bin under <em>Bin mapping</em>. Class names such as <code>recycling</code>,
+        <code>landfill</code>, <code>organics</code> or <code>yellow</code> are mapped automatically; a class named
+        <code>unknown</code> or <code>background</code> shows “No item”.</p>
+      <div id="defaultSourceFields" class="source-fields" hidden>
         <p class="help"><a href="https://huggingface.co/AmadFR/ecovision_mobilenetv3" target="_blank" rel="noopener">EcoVision</a>
           MobileNetV3-Large (MIT licence, by AmadFR) trained on about 20,000 images: battery, biological, cardboard, clothes,
           glass, metal, paper, plastic, shoes, trash. 8.4&nbsp;MB download.</p>
@@ -134,7 +128,7 @@
         <p class="help">MobileNetV2 (0.5 width, 160×160) trained on TrashNet: cardboard, glass, metal, paper, plastic, trash.
           1.4&nbsp;MB and about 5× less computation. Needs one item on a plain background; tends to over-predict cardboard/paper.</p>
       </div>
-      <div id="urlSourceFields" class="source-fields" hidden>
+      <div id="urlSourceFields" class="source-fields">
         <label>Teachable Machine model URL
           <input id="modelUrl" inputmode="url" placeholder="https://teachablemachine.withgoogle.com/models/MODEL_ID/">
         </label>
@@ -155,6 +149,14 @@
           The files stay on this device; they are not uploaded to any server.</p>
       </div>
       </div>
+      <details class="bin-mapping">
+          <summary>Bin mapping: label → bin (editable)</summary>
+          <p class="help">Defaults follow common Australian kerbside rules and are defined in <code>bins.js</code>.
+            Councils differ, so adjust them here; changes are saved on this device and highlighted.</p>
+          <div class="table-wrap"><table><thead><tr><th>Label</th><th>Bin</th></tr></thead>
+            <tbody id="binMappingRows"></tbody></table></div>
+          <div class="actions"><button id="resetBinsButton" class="small">Reset to defaults</button></div>
+        </details>
       <label>Compute backend
         <select id="backend">
           <option value="webgl" selected>WebGL (GPU) – fastest on most devices</option>

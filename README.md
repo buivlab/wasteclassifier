@@ -73,15 +73,24 @@ This applies to the material-classifier pipelines only; the default COCO → bin
 
 The *Backend* row in *System state* shows the compute backend, GPU name and whether the GPU supports 32-bit or only 16-bit floats.
 
-## Prepare your own model
+## Use your own Teachable Machine model
 
-Select **Teachable Machine URL** or **Upload model files** under *Model source* to use your own model instead.
+The app has three pipelines (*Pipeline* under *Classifier configuration*):
 
-Create or obtain a Teachable Machine image model with classes that match the project, for example `recycled`, `green`, `landfill` and `unknown`. Export it as TensorFlow.js and host it with HTTPS. A shared Teachable Machine URL has this form:
+| Pipeline | What decides the bin | Training needed |
+|---|---|---|
+| **COCO object detection → bin** (default) | COCO's object label, e.g. `bottle` → yellow | None |
+| **Image classifier** | Your Teachable Machine model's class, applied to the dashed target box | Yes |
+| **COCO detection, then image classifier** | Your model's class, applied to the object COCO found | Yes |
 
-`https://teachablemachine.withgoogle.com/models/MODEL_ID/`
+To use Teachable Machine:
 
-The app adds `model.json` and `metadata.json` automatically. Include an `unknown`/`no item` class and diverse lighting/background examples; otherwise a classifier is forced to choose a waste class for every frame.
+1. Train an image model with one class per item type or bin, **plus an `unknown` (or `background`) class** photographed with no item. Use varied lighting and backgrounds.
+2. Export it as TensorFlow.js and copy the shareable link, for example `https://teachablemachine.withgoogle.com/models/MODEL_ID/`. The app adds `model.json` and `metadata.json` automatically. Alternatively, download the export and choose *Upload model files*.
+3. Choose *Pipeline* → **Image classifier**, keep *Image classifier* → **Teachable Machine model URL**, paste the link and tap **Load model**.
+4. Check **Bin mapping**. The model's classes are listed at the top. Class names containing a bin word are mapped automatically: `recycling`/`recycled`/`yellow` → yellow, `landfill`/`rubbish`/`red` → red, `organics`/`food`/`garden`/`green` → green, material names such as `plastic` or `paper` → yellow, and `unknown`/`background`/`nothing` → **No item**. Set any class marked *No bin rule* by hand; the log lists them after loading.
+
+Model URLs must use `https://` (or `http://localhost` for local testing).
 
 ## Run it on an Android tablet
 
@@ -89,7 +98,7 @@ The page must be served over HTTPS for camera access. Opening `index.html` direc
 
 1. Upload this folder to GitHub Pages, an SCU HTTPS web server or another static HTTPS host.
 2. Open the HTTPS URL in an updated Chrome browser on the tablet.
-3. Keep the default model, or choose another model source, and enter a unique device ID.
+3. Keep the default COCO pipeline or load your Teachable Machine model (see above), and enter a unique device ID.
 4. Use a broker that supports secure MQTT WebSockets. The example public endpoint is for classroom testing only.
 5. Set the topic, for example `prog6002/2026/team01-tablet01/classification`.
 6. Tap **Connect MQTT**, then **Publish test message**. Confirm it in the HiveMQ WebSocket client.
