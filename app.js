@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const fields = ["modelUrl","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
+const fields = ["modelSource","modelUrl","normalization","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
 const STORAGE_KEY = "prog6002-classifier", LOG_VISIBLE_KEY = "prog6002-log-visible";
 let model = null, stream = null, running = false, mqttClient = null, subscribedTopic = "";
 let candidate = "", candidateFrames = 0, lastPublishedClass = "", lastPublishedAt = 0;
@@ -57,26 +57,155 @@ function saveSettings() {
   } catch (error) { log(`Could not save configuration: ${error.message}`, "error"); }
 }
 
-// ---------- Camera ----------
+// ---------- Model URL ----------
 function normalizedModelUrl() {
   const raw = value("modelUrl");
   if (!/^https:\/\//i.test(raw)) throw new Error("Model URL must start with https://");
   return raw.endsWith("/") ? raw : raw + "/";
 }
 
-async function loadModel() {
+// ---------- Model loading ----------
+// Every model is wrapped so the rest of the app can call
+// predict(videoElement) -> [{className, probability}] and getTotalClasses().
+
+async function loadTeachableMachineUrl() {
   const base = normalizedModelUrl();
+  const tm = await tmImage.load(base + "model.json", base + "metadata.json");
+  return { predict: (video) => tm.predict(video, false), getTotalClasses: () => tm.getTotalClasses(),
+           dispose: () => tm.dispose?.(), source: base,
+           description: `Teachable Machine model with ${tm.getTotalClasses()} classes` };
+}
+
+function readFileText(file) { return file.text(); }
+
+async function readLabels(files) {
+  const txt = files.find(f => /\.txt$/i.test(f.name));
+  if (txt) return (await readFileText(txt)).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const meta = files.find(f => /metadata.*\.json$/i.test(f.name));
+  if (meta) {
+    const data = JSON.parse(await readFileText(meta));
+    if (Array.isArray(data.labels)) return data.labels;
+  }
+  return [];
+}
+
+async function loadModelFiles() {
+  const files = [...$("modelFiles").files];
+  if (!files.length) throw new Error("Select the model files first (model.json + .bin weights).");
+  const jsonFiles = files.filter(f => /\.json$/i.test(f.name) && !/metadata/i.test(f.name));
+  if (jsonFiles.length !== 1) throw new Error(`Select exactly one model JSON file (found ${jsonFiles.length}).`);
+  const modelJsonFile = jsonFiles[0];
+  const modelJson = JSON.parse(await readFileText(modelJsonFile));
+  if (!modelJson.modelTopology || !modelJson.weightsManifest) throw new Error(`${modelJsonFile.name} is not a TensorFlow.js model file.`);
+
+  // Check every weight shard named in the manifest was selected.
+  const weightFiles = files.filter(f => /\.bin$/i.test(f.name));
+  const needed = modelJson.weightsManifest.flatMap(group => group.paths).map(p => p.split("/").pop());
+  const missing = needed.filter(name => !weightFiles.some(f => f.name === name));
+  if (missing.length) throw new Error(`Missing weight file(s): ${missing.join(", ")}`);
+
+  const handler = tf.io.browserFiles([modelJsonFile, ...weightFiles]);
+  const isGraph = modelJson.format === "graph-model";
+  const net = isGraph ? await tf.loadGraphModel(handler) : await tf.loadLayersModel(handler);
+
+  const inputShape = net.inputs[0].shape;          // e.g. [null, 224, 224, 3]
+  const height = inputShape[1] > 0 ? inputShape[1] : 224;
+  const width = inputShape[2] > 0 ? inputShape[2] : 224;
+  const channels = inputShape[3] > 0 ? inputShape[3] : 3;
+  const outputSize = net.outputs[0].shape?.at(-1);
+
+  let labels = await readLabels(files);
+  if (outputSize > 0 && labels.length !== outputSize) {
+    if (labels.length) log(`Label count (${labels.length}) does not match model outputs (${outputSize}); using generic names for extras.`, "warn");
+    labels = Array.from({length: outputSize}, (_, i) => labels[i] ?? `Class ${i + 1}`);
+  }
+  const normalization = $("normalization").value;
+
+  function preprocess(video) {
+    return tf.tidy(() => {
+      let img = tf.browser.fromPixels(video);        // [H, W, 3] int32
+      const [h, w] = img.shape, size = Math.min(h, w);
+      // Centre-crop to a square (matches Teachable Machine), then resize.
+      img = img.slice([Math.floor((h - size) / 2), Math.floor((w - size) / 2), 0], [size, size, 3]);
+      img = tf.image.resizeBilinear(img, [height, width]).toFloat();
+      if (channels === 1) img = img.mean(2, true);
+      if (normalization === "-1to1") img = img.div(127.5).sub(1);
+      else if (normalization === "0to1") img = img.div(255);
+      return img.expandDims(0);
+    });
+  }
+
+  async function predict(video) {
+    const scores = tf.tidy(() => {
+      let out = net.predict(preprocess(video));
+      if (Array.isArray(out)) out = out[0];
+      out = out.squeeze();
+      // Apply softmax if the model outputs logits rather than probabilities.
+      const sum = out.sum().dataSync()[0], min = out.min().dataSync()[0];
+      return (min < 0 || Math.abs(sum - 1) > 0.01) ? tf.softmax(out) : out;
+    });
+    const values = await scores.data();
+    scores.dispose();
+    return Array.from(values, (p, i) => ({ className: labels[i] ?? `Class ${i + 1}`, probability: p }));
+  }
+
+  // Warm up once so the first real frame is not slow.
+  tf.tidy(() => { net.predict(tf.zeros([1, height, width, channels])); });
+
+  return { predict, getTotalClasses: () => labels.length, dispose: () => net.dispose(),
+           source: `local:${modelJsonFile.name}`,
+           description: `${isGraph ? "Graph" : "Layers"} model from ${modelJsonFile.name}: ` +
+                        `input ${width}×${height}×${channels}, ${labels.length} classes, ${normalization} normalisation` };
+}
+
+async function loadModel() {
+  if (running) throw new Error("Stop classification before loading a different model.");
+  if (typeof tf === "undefined") throw new Error("TensorFlow.js failed to load. Check the internet connection and reload.");
+  const source = $("modelSource").value;
   setText("modelStatus", "Loading…");
   try {
-    model = await tmImage.load(base + "model.json", base + "metadata.json");
+    const loaded = source === "files" ? await loadModelFiles() : await loadTeachableMachineUrl();
+    if (model) model.dispose?.();
+    model = loaded;
   } catch (error) {
-    setText("modelStatus", "Load failed");
+    setText("modelStatus", model ? "Load failed (previous model kept)" : "Load failed");
     throw new Error(`Model load failed: ${error.message}`);
   }
   setText("modelStatus", `${model.getTotalClasses()} classes loaded`);
-  log(`Model loaded with ${model.getTotalClasses()} classes.`);
+  log(`Model loaded: ${model.description}.`);
+  $("className").textContent = "—"; $("predictions").replaceChildren();
 }
 
+async function loadModelButton() {
+  $("loadModelButton").disabled = true;
+  try { await loadModel(); } catch (error) { log(error.message, "error"); }
+  finally { $("loadModelButton").disabled = false; }
+}
+
+function updateModelSourceUi() {
+  const files = $("modelSource").value === "files";
+  $("urlSourceFields").hidden = files;
+  $("fileSourceFields").hidden = !files;
+}
+
+function showSelectedFiles() {
+  const files = [...$("modelFiles").files];
+  $("modelFileList").replaceChildren(...files.map(f => {
+    const li = document.createElement("li");
+    li.textContent = `${f.name} (${(f.size / 1024).toFixed(1)} KB)`;
+    return li;
+  }));
+  if (files.length) log(`Selected ${files.length} model file(s). Tap “Load model” or start the classifier.`);
+}
+
+function modelSettingsChanged() {
+  if (!model || running) return;
+  model.dispose?.(); model = null;
+  setText("modelStatus", "Not loaded");
+  log("Model settings changed; the model will be reloaded on next start.");
+}
+
+// ---------- Camera ----------
 function cameraErrorMessage(error) {
   switch (error.name) {
     case "NotAllowedError": return "Camera permission denied. Allow camera access in the browser site settings.";
@@ -154,8 +283,7 @@ function updateStability(label) {
 }
 
 function buildPayload(top, sorted, inferenceMs, source="camera") {
-  let modelUrl = null;
-  try { modelUrl = normalizedModelUrl(); } catch {}
+  const modelUrl = model?.source ?? null;
   return {
     schema_version:1, message_type:"waste_classification", device_id:value("deviceId"),
     sequence:++sequence, timestamp:new Date().toISOString(), source,
@@ -196,7 +324,7 @@ async function inferenceLoop() {
   if (!running) return;
   try {
     const start=performance.now();
-    const predictions=await model.predict($("camera"), false);
+    const predictions=await model.predict($("camera"));
     const elapsed=performance.now()-start;
     setText("inferenceTime", `${Math.round(elapsed)} ms`);
     const {top,sorted}=showPredictions(predictions);
@@ -334,6 +462,11 @@ function publishTest() {
 
 // ---------- Wiring ----------
 $("startButton").addEventListener("click",start);
+$("loadModelButton").addEventListener("click",loadModelButton);
+$("modelSource").addEventListener("change",()=>{updateModelSourceUi(); modelSettingsChanged();});
+$("modelFiles").addEventListener("change",()=>{showSelectedFiles(); modelSettingsChanged();});
+$("modelUrl").addEventListener("change",modelSettingsChanged);
+$("normalization").addEventListener("change",modelSettingsChanged);
 $("cameraTestButton").addEventListener("click",testCamera);
 $("stopButton").addEventListener("click",stopAll);
 $("mqttButton").addEventListener("click",connectMqtt);
@@ -348,4 +481,5 @@ window.addEventListener("error",e=>log(`Script error: ${e.message}`,"error"));
 window.addEventListener("unhandledrejection",e=>log(`Unhandled error: ${e.reason?.message || e.reason}`,"error"));
 window.addEventListener("pagehide",()=>{stopAll(); if(mqttClient)mqttClient.end(true);});
 loadSettings();
+updateModelSourceUi();
 log("App ready. Test the camera and MQTT independently, or configure a model URL and start classifying.");

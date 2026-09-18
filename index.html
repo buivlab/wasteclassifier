@@ -52,9 +52,35 @@
 
     <section class="panel">
       <h2>Classifier configuration</h2>
-      <label>Teachable Machine model URL
-        <input id="modelUrl" inputmode="url" placeholder="https://teachablemachine.withgoogle.com/models/MODEL_ID/">
+      <label>Model source
+        <select id="modelSource">
+          <option value="url">Teachable Machine URL (online)</option>
+          <option value="files">Upload model files (runs locally)</option>
+        </select>
       </label>
+      <div id="urlSourceFields" class="source-fields">
+        <label>Teachable Machine model URL
+          <input id="modelUrl" inputmode="url" placeholder="https://teachablemachine.withgoogle.com/models/MODEL_ID/">
+        </label>
+      </div>
+      <div id="fileSourceFields" class="source-fields" hidden>
+        <label>Model files: select <code>model.json</code>, all <code>.bin</code> weight files, and <code>metadata.json</code> or <code>labels.txt</code>
+          <input id="modelFiles" type="file" multiple accept=".json,.bin,.txt,application/json,application/octet-stream,text/plain">
+        </label>
+        <ul id="modelFileList" class="file-list"></ul>
+        <label>Input normalisation
+          <select id="normalization">
+            <option value="-1to1">[-1, 1] (Teachable Machine / MobileNet)</option>
+            <option value="0to1">[0, 1]</option>
+            <option value="0to255">[0, 255] (raw pixels)</option>
+          </select>
+        </label>
+        <p class="help">Accepts TensorFlow.js layers or graph models, including a Teachable Machine “TensorFlow.js” export.
+          The files stay on this device; they are not uploaded to any server.</p>
+      </div>
+      <div class="actions">
+        <button id="loadModelButton">Load model</button>
+      </div>
       <div class="grid two">
         <label>Device ID <input id="deviceId" value="team01-tablet01"></label>
         <label>Confidence threshold <input id="threshold" type="number" min="0.1" max="1" step="0.05" value="0.75"></label>
