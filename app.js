@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const fields = ["modelSource","modelUrl","normalization","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
+const fields = ["modelSource","modelUrl","normalization","backend","region","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
 const STORAGE_KEY = "prog6002-classifier", LOG_VISIBLE_KEY = "prog6002-log-visible";
 let model = null, stream = null, running = false, mqttClient = null, subscribedTopic = "";
 let candidate = "", candidateFrames = 0, lastPublishedClass = "", lastPublishedAt = 0;
@@ -71,7 +71,9 @@ function normalizedModelUrl() {
 async function loadTeachableMachineUrl() {
   const base = normalizedModelUrl();
   const tm = await tmImage.load(base + "model.json", base + "metadata.json");
-  return { predict: (video) => tm.predict(video, false), getTotalClasses: () => tm.getTotalClasses(),
+  // Teachable Machine does its own centre-crop; region and preview are not supported.
+  return { predict: async (src) => ({ predictions: await tm.predict(src, false), stats: null }),
+           getTotalClasses: () => tm.getTotalClasses(),
            dispose: () => tm.dispose?.(), source: base,
            description: `Teachable Machine model with ${tm.getTotalClasses()} classes` };
 }
@@ -128,14 +130,142 @@ async function loadBundledModel(key) {
   const net = meta.format === "graph-model" ? await tf.loadGraphModel(dir + "model.json")
                                             : await tf.loadLayersModel(dir + "model.json");
   return wrapTfjsModel(net, {
-    labels: meta.labels ?? [], normalization: meta.normalization ?? "-1to1", resize: meta.resize ?? "crop",
+    labels: meta.labels ?? [], normalization: meta.normalization ?? "-1to1",
     source: `bundled:${meta.modelName ?? key}`, name: `${title} (${meta.architecture ?? "bundled"})`
   });
 }
 
-// Wraps any TF.js image classifier in the app's predict(video) interface.
-// resize: "crop" = centre-crop to square then resize (Teachable Machine); "stretch" = resize whole frame.
-function wrapTfjsModel(net, {labels, normalization, resize = "crop", source, name}) {
+// ---------- Compute backend ----------
+async function ensureBackend() {
+  const wanted = $("backend").value;
+  if (wanted === "wasm" && tf.wasm?.setWasmPaths) tf.wasm.setWasmPaths("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/");
+  if (tf.getBackend() !== wanted) {
+    const ok = await tf.setBackend(wanted).catch(() => false);
+    if (!ok) { log(`Could not start the ${wanted} backend; using ${tf.getBackend()}.`, "error"); }
+  }
+  await tf.ready();
+  const info = backendInfo();
+  setText("backendStatus", info);
+  return info;
+}
+
+function backendInfo() {
+  const name = tf.getBackend();
+  if (name !== "webgl") return name === "wasm" ? "WebAssembly (CPU)" : name;
+  let gpu = "unknown GPU";
+  try {
+    const gl = tf.backend().gpgpu.gl, ext = gl.getExtension("WEBGL_debug_renderer_info");
+    gpu = gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+  } catch {}
+  const bits = tf.env().getBool("WEBGL_RENDER_FLOAT32_CAPABLE") ? "32-bit" : "16-bit";
+  return `WebGL ${tf.env().getNumber("WEBGL_VERSION")} (${gpu}, ${bits} float)`;
+}
+
+async function backendChanged() {
+  if (running) { log("Stop classification before changing the compute backend.", "error"); return; }
+  modelSettingsChanged();
+  try { log(`Compute backend: ${await ensureBackend()}.`); } catch (error) { log(error.message, "error"); }
+}
+
+// ---------- Diagnostics ----------
+const SELFTEST_DIR = "models/selftest/";
+let blankFrames = 0, lastBlankWarning = 0;
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Could not load image ${url}`));
+    img.src = url;
+  });
+}
+
+function showInputStats(stats) {
+  if (!stats) { setText("inputStats", "Preview not available for Teachable Machine URL models."); return; }
+  setText("inputStats", `Brightness ${stats.brightness.toFixed(0)} / 255 · Contrast ${stats.contrast.toFixed(0)}`);
+  blankFrames = stats.contrast < 8 ? blankFrames + 1 : 0;
+  if (blankFrames >= 8 && Date.now() - lastBlankWarning > 10000) {
+    lastBlankWarning = Date.now();
+    log(`Camera frames look blank (brightness ${stats.brightness.toFixed(0)}, contrast ${stats.contrast.toFixed(1)}). ` +
+        "Blank input makes the models answer cardboard/paper. Check the preview, lighting and lens.", "warn");
+  }
+}
+
+// Runs the bundled model on reference images and compares with results from a known-good backend.
+async function runSelfTest() {
+  const key = $("modelSource").value;
+  if (!BUNDLED_MODELS[key]) { log("Self-test is available for the bundled models only.", "warn"); return; }
+  $("selfTestButton").disabled = true;
+  try {
+    if (!model) await loadModel();
+    const expected = (await (await fetch(SELFTEST_DIR + "expected.json")).json())[key];
+    let passed = 0;
+    for (const [file, ref] of Object.entries(expected)) {
+      const {predictions} = await model.predict(await loadImage(SELFTEST_DIR + file), {region: "full", preview: $("inputPreview")});
+      const top = predictions.reduce((a, b) => b.probability > a.probability ? b : a);
+      // Compare every class probability with the reference (robust even when two classes are close).
+      const diff = Math.max(...predictions.map(p => Math.abs(p.probability - (ref.probabilities[p.className] ?? 0))));
+      const ok = diff < 0.1;
+      passed += ok;
+      log(`Self-test ${file}: got ${top.className} ${(top.probability * 100).toFixed(1)}%, reference ${ref.label}; ` +
+          `largest difference ${(diff * 100).toFixed(1)} points → ${ok ? "PASS" : "FAIL"}`, ok ? "info" : "error");
+    }
+    const total = Object.keys(expected).length, info = backendInfo();
+    if (passed === total) log(`Self-test passed ${passed}/${total} on ${info}. The model computes correctly on this device.`);
+    else log(`Self-test FAILED ${total - passed}/${total} on ${info}. This backend gives wrong results on this device; ` +
+             "choose WebAssembly under Compute backend and re-test.", "error");
+  } catch (error) { log(`Self-test error: ${error.message}`, "error"); }
+  finally { $("selfTestButton").disabled = false; }
+}
+
+// Classifies a still photo (from the gallery or the phone's camera app) without the live video path.
+async function classifyPhoto() {
+  const file = $("photoInput").files[0];
+  if (!file) return;
+  try {
+    if (!model) await loadModel();
+    const url = URL.createObjectURL(file);
+    const img = await loadImage(url);
+    URL.revokeObjectURL(url);
+    // Downscale large phone photos before classification.
+    const scale = Math.min(1, 800 / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(img.naturalWidth * scale); canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    const {predictions, stats} = await model.predict(canvas, {region: $("region").value, preview: $("inputPreview")});
+    const {sorted} = showPredictions(predictions);
+    showInputStats(stats);
+    log(`Photo ${file.name}: ` + sorted.slice(0, 3).map(p => `${p.className} ${(p.probability * 100).toFixed(1)}%`).join(", "));
+  } catch (error) { log(`Photo classification failed: ${error.message}`, "error"); }
+  finally { $("photoInput").value = ""; }
+}
+
+// Draws the model's region on top of the video so users can frame the item.
+function updateRegionGuide() {
+  const video = $("camera"), guide = $("regionGuide");
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh || $("region").value === "full") { guide.hidden = true; return; }
+  const cw = video.clientWidth, ch = video.clientHeight;
+  const scale = Math.min(cw / vw, ch / vh);                // video uses object-fit: contain
+  const ox = (cw - vw * scale) / 2, oy = (ch - vh * scale) / 2;
+  const r = regionRect(vw, vh, $("region").value);
+  Object.assign(guide.style, { left: `${ox + r.x * scale}px`, top: `${oy + r.y * scale}px`,
+                               width: `${r.w * scale}px`, height: `${r.h * scale}px` });
+  guide.hidden = false;
+}
+
+// Region of the camera frame sent to the model: "full" frame, or a centred square with optional zoom.
+function regionRect(width, height, region) {
+  if (region === "full") return { x: 0, y: 0, w: width, h: height };
+  const zoom = { zoom15: 1.5, zoom2: 2 }[region] ?? 1;
+  const size = Math.round(Math.min(width, height) / zoom);
+  return { x: Math.floor((width - size) / 2), y: Math.floor((height - size) / 2), w: size, h: size };
+}
+
+// Wraps any TF.js image classifier in the app's interface:
+// predict(source, {region, preview}) -> {predictions: [{className, probability}], stats: {brightness, contrast}}
+// source can be a <video>, <img> or <canvas>; preview is an optional canvas showing exactly what the model sees.
+function wrapTfjsModel(net, {labels, normalization, source, name}) {
   const inputShape = net.inputs[0].shape;          // e.g. [null, 224, 224, 3]
   const height = inputShape[1] > 0 ? inputShape[1] : 224;
   const width = inputShape[2] > 0 ? inputShape[2] : 224;
@@ -147,33 +277,48 @@ function wrapTfjsModel(net, {labels, normalization, resize = "crop", source, nam
     labels = Array.from({length: outputSize}, (_, i) => labels[i] ?? `Class ${i + 1}`);
   }
 
-  function preprocess(video) {
+  // Crop the chosen region and resize to the model's input size. Result: [H, W, 3] float, 0-255.
+  function cropResize(source, region) {
     return tf.tidy(() => {
-      let img = tf.browser.fromPixels(video);        // [H, W, 3] int32
-      if (resize === "crop") {
-        const [h, w] = img.shape, size = Math.min(h, w);
-        img = img.slice([Math.floor((h - size) / 2), Math.floor((w - size) / 2), 0], [size, size, 3]);
-      }
-      img = tf.image.resizeBilinear(img, [height, width]).toFloat();
-      if (channels === 1) img = img.mean(2, true);
+      let img = tf.browser.fromPixels(source);       // [H, W, 3] int32
+      const r = regionRect(img.shape[1], img.shape[0], region);
+      if (r.w !== img.shape[1] || r.h !== img.shape[0]) img = img.slice([r.y, r.x, 0], [r.h, r.w, 3]);
+      return tf.image.resizeBilinear(img, [height, width]).toFloat();
+    });
+  }
+
+  function normalise(view) {
+    return tf.tidy(() => {
+      let img = channels === 1 ? view.mean(2, true) : view;
       if (normalization === "-1to1") img = img.div(127.5).sub(1);
       else if (normalization === "0to1") img = img.div(255);
       return img.expandDims(0);
     });
   }
 
-  async function predict(video) {
-    const scores = tf.tidy(() => {
-      let out = net.predict(preprocess(video));
-      if (Array.isArray(out)) out = out[0];
-      out = out.squeeze();
-      // Apply softmax if the model outputs logits rather than probabilities.
-      const sum = out.sum().dataSync()[0], min = out.min().dataSync()[0];
-      return (min < 0 || Math.abs(sum - 1) > 0.01) ? tf.softmax(out) : out;
-    });
-    const values = await scores.data();
-    scores.dispose();
-    return Array.from(values, (p, i) => ({ className: labels[i] ?? `Class ${i + 1}`, probability: p }));
+  async function predict(src, {region = "square", preview = null} = {}) {
+    const view = cropResize(src, region);
+    try {
+      const scores = tf.tidy(() => {
+        let out = net.predict(normalise(view));
+        if (Array.isArray(out)) out = out[0];
+        out = out.squeeze();
+        // Apply softmax if the model outputs logits rather than probabilities.
+        const sum = out.sum().dataSync()[0], min = out.min().dataSync()[0];
+        return (min < 0 || Math.abs(sum - 1) > 0.01) ? tf.softmax(out) : out;
+      });
+      const values = await scores.data();
+      scores.dispose();
+      // Brightness = mean pixel value; contrast = standard deviation. Near-zero contrast means a blank frame.
+      const stats = tf.tidy(() => { const {mean, variance} = tf.moments(view);
+        return { brightness: mean.dataSync()[0], contrast: Math.sqrt(variance.dataSync()[0]) }; });
+      if (preview) {
+        const pixels = tf.tidy(() => view.div(255).clipByValue(0, 1));
+        await tf.browser.toPixels(pixels, preview);
+        pixels.dispose();
+      }
+      return { stats, predictions: Array.from(values, (p, i) => ({ className: labels[i] ?? `Class ${i + 1}`, probability: p })) };
+    } finally { view.dispose(); }
   }
 
   // Warm up once so the first real frame is not slow.
@@ -190,6 +335,7 @@ async function loadModel() {
   const source = $("modelSource").value;
   setText("modelStatus", "Loading…");
   try {
+    await ensureBackend();
     const loaded = source === "files" ? await loadModelFiles()
                  : source === "url" ? await loadTeachableMachineUrl()
                  : await loadBundledModel(BUNDLED_MODELS[source] ? source : "default");
@@ -261,6 +407,7 @@ async function startCamera() {
   $("camera").srcObject = stream;
   await $("camera").play();
   $("cameraMessage").classList.add("hidden");
+  updateRegionGuide();
   const settings = stream.getVideoTracks()[0]?.getSettings() || {};
   setText("cameraStatus", `Running${settings.width ? ` (${settings.width}×${settings.height})` : ""}`);
   log(`Camera started${settings.width ? ` at ${settings.width}×${settings.height}` : ""}.`);
@@ -284,6 +431,7 @@ function stopAll() {
   if (stream) stream.getTracks().forEach(track => track.stop());
   stream = null;
   $("camera").srcObject = null;
+  $("regionGuide").hidden = true;
   $("cameraMessage").textContent = "Camera stopped";
   $("cameraMessage").classList.remove("hidden");
   $("startButton").disabled = false; $("stopButton").disabled = true;
@@ -345,6 +493,8 @@ function considerPublish(top, sorted, inferenceMs) {
   const now=Date.now(), stable=candidateFrames>=required, confident=top.probability>=threshold;
   const changed=top.className!==lastPublishedClass, cooldownPassed=now-lastPublishedAt>=cooldown;
   if (stable && confident && (changed || cooldownPassed)) {
+    // Without MQTT, keep classifying but do not try to publish (and do not flood the log).
+    if (!mqttClient?.connected) return;
     const payload=buildPayload(top,sorted,inferenceMs);
     if (publishPayload(payload)) { lastPublishedClass=top.className; lastPublishedAt=now; candidateFrames=0; }
   }
@@ -354,9 +504,10 @@ async function inferenceLoop() {
   if (!running) return;
   try {
     const start=performance.now();
-    const predictions=await model.predict($("camera"));
+    const {predictions, stats}=await model.predict($("camera"), {region: $("region").value, preview: $("inputPreview")});
     const elapsed=performance.now()-start;
     setText("inferenceTime", `${Math.round(elapsed)} ms`);
+    showInputStats(stats);
     const {top,sorted}=showPredictions(predictions);
     considerPublish(top,sorted,elapsed);
   } catch (error) { log(`Inference error: ${error.message}`, "error"); stopAll(); return; }
@@ -496,6 +647,13 @@ $("loadModelButton").addEventListener("click",loadModelButton);
 $("modelSource").addEventListener("change",()=>{updateModelSourceUi(); modelSettingsChanged();});
 $("modelFiles").addEventListener("change",()=>{showSelectedFiles(); modelSettingsChanged();});
 $("modelUrl").addEventListener("change",modelSettingsChanged);
+$("backend").addEventListener("change",backendChanged);
+$("region").addEventListener("change",updateRegionGuide);
+$("camera").addEventListener("loadedmetadata",updateRegionGuide);
+$("camera").addEventListener("resize",updateRegionGuide);   // fires when the phone rotates
+window.addEventListener("resize",updateRegionGuide);
+$("selfTestButton").addEventListener("click",runSelfTest);
+$("photoInput").addEventListener("change",classifyPhoto);
 $("normalization").addEventListener("change",modelSettingsChanged);
 $("cameraTestButton").addEventListener("click",testCamera);
 $("stopButton").addEventListener("click",stopAll);

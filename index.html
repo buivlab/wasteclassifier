@@ -33,6 +33,7 @@
     <section class="camera-card">
       <div class="video-wrap">
         <video id="camera" autoplay muted playsinline></video>
+        <div id="regionGuide" class="region-guide" hidden><span>Fill this box with the item</span></div>
         <div id="cameraMessage" class="overlay">Tap “Test camera only” or “Start camera &amp; model”</div>
       </div>
       <div class="result">
@@ -48,6 +49,35 @@
         <button id="stopButton" disabled>Stop</button>
       </div>
       <p class="help">“Test camera only” opens the camera without loading the model or publishing anything.</p>
+
+      <details class="diagnostics" open>
+        <summary>What the model sees &amp; diagnostics</summary>
+        <div class="diag-grid">
+          <figure>
+            <canvas id="inputPreview" width="224" height="224"></canvas>
+            <figcaption id="inputStats">Model input appears here while classifying.</figcaption>
+          </figure>
+          <div class="diag-controls">
+            <label>Classification region
+              <select id="region">
+                <option value="square" selected>Centre square</option>
+                <option value="zoom15">Centre square, zoom 1.5×</option>
+                <option value="zoom2">Centre square, zoom 2×</option>
+                <option value="full">Whole frame</option>
+              </select>
+            </label>
+            <p class="help">Only the area inside the dashed box is classified. The item should fill most of it:
+              a blank background (table, wall) is usually classified as cardboard or paper.</p>
+            <label>Classify a photo instead of live video
+              <input id="photoInput" type="file" accept="image/*">
+            </label>
+            <div class="actions">
+              <button id="selfTestButton">Run model self-test</button>
+            </div>
+            <p class="help">The self-test checks that the bundled model computes correctly on this device's compute backend.</p>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section class="panel">
@@ -89,6 +119,13 @@
         <p class="help">Accepts TensorFlow.js layers or graph models, including a Teachable Machine “TensorFlow.js” export.
           The files stay on this device; they are not uploaded to any server.</p>
       </div>
+      <label>Compute backend
+        <select id="backend">
+          <option value="webgl" selected>WebGL (GPU) – fastest on most devices</option>
+          <option value="wasm">WebAssembly (CPU) – most reliable on old GPUs</option>
+          <option value="cpu">Plain JavaScript (CPU) – very slow, reference only</option>
+        </select>
+      </label>
       <div class="actions">
         <button id="loadModelButton">Load model</button>
       </div>
@@ -151,6 +188,7 @@
         <h2>System state</h2>
         <dl>
           <div><dt>Model</dt><dd id="modelStatus">Not loaded</dd></div>
+          <div><dt>Backend</dt><dd id="backendStatus">—</dd></div>
           <div><dt>Camera</dt><dd id="cameraStatus">Stopped</dd></div>
           <div><dt>MQTT</dt><dd id="mqttStatus">Disconnected</dd></div>
           <div><dt>Subscribed</dt><dd id="subscribedStatus">—</dd></div>
@@ -168,6 +206,7 @@
   <footer>Classification runs locally in the browser. Images are not sent through MQTT by this sample.</footer>
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/tf-backend-wasm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
   <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
   <script src="app.js"></script>

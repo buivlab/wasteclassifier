@@ -8,7 +8,8 @@ h2 { margin:0 0 .8rem; font-size:1.05rem; }
 main { width:min(1050px,100%); margin:auto; padding:1rem; display:grid; gap:1rem; }
 .camera-card,.panel { background:white; border:1px solid #d5e0e7; border-radius:16px; padding:1rem; box-shadow:0 5px 18px #12304712; }
 .video-wrap { position:relative; width:100%; aspect-ratio:4/3; max-height:55vh; overflow:hidden; background:#071723; border-radius:12px; }
-video { width:100%; height:100%; object-fit:cover; }
+/* contain: show the whole camera frame, so nothing the model sees is hidden */
+video { width:100%; height:100%; object-fit:contain; }
 .overlay { position:absolute; inset:0; display:grid; place-items:center; color:white; background:#071723cc; text-align:center; padding:1rem; }
 .overlay.hidden { display:none; }
 .result { display:grid; grid-template-columns:auto 1fr auto; gap:.75rem; align-items:center; padding:.9rem 0 .3rem; }
@@ -59,3 +60,13 @@ select { width:100%; min-height:44px; padding:.55rem; border:1px solid #aebfca; 
 input[type=file] { padding:.5rem; background:#f5f8fa; }
 .file-list { margin:0; padding-left:1.2rem; font-size:.8rem; color:#3d5566; }
 .file-list:empty { display:none; }
+.region-guide { position:absolute; border:3px dashed #7ce0ef; border-radius:8px; pointer-events:none; box-shadow:0 0 0 9999px #07172366; }
+.region-guide span { position:absolute; left:50%; bottom:.4rem; transform:translateX(-50%); padding:.15rem .5rem; border-radius:999px; background:#071723cc; color:white; font-size:.72rem; white-space:nowrap; }
+.diagnostics { margin-top:1rem; border-top:1px solid #e7eef2; padding-top:.6rem; }
+.diag-grid { display:grid; grid-template-columns:auto 1fr; gap:1rem; margin-top:.8rem; align-items:start; }
+.diag-grid figure { margin:0; display:grid; gap:.35rem; justify-items:center; }
+#inputPreview { width:150px; height:150px; border-radius:10px; background:#071723; image-rendering:auto; }
+#inputStats { font-size:.75rem; color:#3d5566; text-align:center; max-width:150px; }
+.diag-controls { display:grid; gap:.6rem; }
+.diag-controls .help { margin:0; }
+@media (max-width:520px) { .diag-grid { grid-template-columns:1fr; } }

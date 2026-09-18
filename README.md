@@ -36,6 +36,17 @@ Limitations to discuss with students:
 - The classes describe materials, not local bins. Map them to your council's bin categories in the MQTT consumer, or train a Teachable Machine model on your own items and bins.
 - Check the **Inference** time on your tablet. If EcoVision is too slow, raise the stable-frame count or switch to Lite.
 
+## Troubleshooting: "everything is cardboard or paper"
+
+Both bundled models answer `cardboard` or `paper` when they see little except background. This happens with a black, grey or white frame, a plain wall or table, or random noise. If every item gets these labels, the model is not seeing the item. Work through the panel **What the model sees & diagnostics**:
+
+1. **Check the preview thumbnail.** It shows exactly what the model receives. If it is black or blank, the camera frames are not reaching the model. *Brightness* and *Contrast* are shown under it; contrast below about 8 means a blank frame, and the log warns about this.
+2. **Fill the dashed box with the item.** Only the area inside the box is classified. In testing, a bottle occupying about a third of the frame on a plain table was classified as `paper` (whole frame or centre square) but as `plastic` at 99.9% with *zoom 2×*.
+3. **Run the model self-test.** It classifies three reference photos and compares every probability with known-good results. If it fails, the phone's GPU is computing wrong results: choose **WebAssembly** under *Compute backend* and test again.
+4. **Classify a photo.** Take a photo with the phone's camera app and select it. If photos work but live video does not, the problem is in the camera stream rather than the model.
+
+The *Backend* row in *System state* shows the compute backend, GPU name and whether the GPU supports 32-bit or only 16-bit floats.
+
 ## Prepare your own model
 
 Select **Teachable Machine URL** or **Upload model files** under *Model source* to use your own model instead.
