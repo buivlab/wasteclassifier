@@ -10,7 +10,32 @@ This is a no-build browser application for demonstrating on-device image classif
 4. Publish a structured JSON result over MQTT WebSockets.
 5. Observe reconnect state, message timing and old-device performance.
 
-## Prepare a model
+## Default model (bundled)
+
+The app loads a lightweight waste classifier from `models/waste-mobilenetv2/` by default, so it works without training anything first.
+
+| Property | Value |
+|---|---|
+| Architecture | MobileNetV2, width 0.5, 160 × 160 input, ImageNet pretrained then fine-tuned |
+| Size | 714k parameters, 1.4 MB download (float16 weights) |
+| Classes | `cardboard`, `glass`, `metal`, `paper`, `plastic`, `trash` |
+| Training data | [TrashNet](https://huggingface.co/datasets/garythung/trashnet) (MIT licence), 2,527 images, 70/15/15 split |
+| Held-out test accuracy | 86% overall; cardboard 98%, paper 88%, glass 87%, metal 84%, plastic 83%, trash 57% |
+
+The model needs about 50 million multiply-adds per frame, roughly the same load as the Teachable Machine models. That keeps it usable on older Android tablets.
+
+Limitations to discuss with students:
+
+- TrashNet photos show one item on a white background. Accuracy drops with cluttered scenes, hands in frame or poor lighting.
+- There is no `unknown`/`empty` class, so an empty scene is still forced into one of the six classes. The confidence threshold and stable-frame rules reduce, but do not remove, false publications.
+- `trash` has few training images and is the weakest class.
+- The classes describe materials, not local bins. Map them to your council's bin categories in the MQTT consumer, or train a Teachable Machine model on your own items and bins.
+
+To retrain or change the architecture, run `tools/train_waste_model.py` (TensorFlow 2.15 with Keras 2, plus `tensorflowjs`). The script documents its settings in its header.
+
+## Prepare your own model
+
+Select **Teachable Machine URL** or **Upload model files** under *Model source* to use your own model instead.
 
 Create or obtain a Teachable Machine image model with classes that match the project, for example `recycled`, `green`, `landfill` and `unknown`. Export it as TensorFlow.js and host it with HTTPS. A shared Teachable Machine URL has this form:
 
@@ -24,7 +49,7 @@ The page must be served over HTTPS for camera access. Opening `index.html` direc
 
 1. Upload this folder to GitHub Pages, an SCU HTTPS web server or another static HTTPS host.
 2. Open the HTTPS URL in an updated Chrome browser on the tablet.
-3. Enter the model URL and a unique device ID.
+3. Keep the default model, or choose another model source, and enter a unique device ID.
 4. Use a broker that supports secure MQTT WebSockets. The example public endpoint is for classroom testing only.
 5. Set the topic, for example `prog6002/2026/team01-tablet01/classification`.
 6. Tap **Connect MQTT**, then **Publish test message**. Confirm it in the HiveMQ WebSocket client.
@@ -65,7 +90,7 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 - The app requests 640 x 480 and limits inference to approximately four runs per second to reduce load.
 - Older tablets may terminate the tab when memory is low. Close other tabs and lower camera resolution or inference frequency if needed.
 - Keep the screen awake during demonstrations; browser background tabs are throttled.
-- Internet access is needed for the CDN libraries, hosted model and public broker. For offline deployment, download and serve dependencies and model files locally.
+- Internet access is needed for the CDN libraries, the Teachable Machine model (if used) and the public broker. The bundled default model is served with the app. For offline deployment, download and serve dependencies and model files locally.
 - Browser-stored MQTT credentials are visible to the device user. Use a restricted teaching account and topic permissions.
 
 ## Suggested tutorial tests

@@ -107,19 +107,39 @@ async function loadModelFiles() {
   const handler = tf.io.browserFiles([modelJsonFile, ...weightFiles]);
   const isGraph = modelJson.format === "graph-model";
   const net = isGraph ? await tf.loadGraphModel(handler) : await tf.loadLayersModel(handler);
+  return wrapTfjsModel(net, {
+    labels: await readLabels(files), normalization: $("normalization").value,
+    source: `local:${modelJsonFile.name}`, name: `${isGraph ? "Graph" : "Layers"} model from ${modelJsonFile.name}`
+  });
+}
 
+// Lightweight waste model shipped with the app (see tools/train_waste_model.py).
+const DEFAULT_MODEL_DIR = "models/waste-mobilenetv2/";
+
+async function loadDefaultModel() {
+  if (location.protocol === "file:") throw new Error("The bundled model needs the page served over http(s), not opened as a file.");
+  const metaResponse = await fetch(DEFAULT_MODEL_DIR + "metadata.json");
+  if (!metaResponse.ok) throw new Error(`Bundled model metadata not found (${metaResponse.status}).`);
+  const meta = await metaResponse.json();
+  const net = await tf.loadLayersModel(DEFAULT_MODEL_DIR + "model.json");
+  return wrapTfjsModel(net, {
+    labels: meta.labels ?? [], normalization: meta.normalization ?? "-1to1",
+    source: `bundled:${meta.modelName ?? "waste-model"}`, name: `Default waste model (${meta.architecture ?? "bundled"})`
+  });
+}
+
+// Wraps any TF.js image classifier in the app's predict(video) interface.
+function wrapTfjsModel(net, {labels, normalization, source, name}) {
   const inputShape = net.inputs[0].shape;          // e.g. [null, 224, 224, 3]
   const height = inputShape[1] > 0 ? inputShape[1] : 224;
   const width = inputShape[2] > 0 ? inputShape[2] : 224;
   const channels = inputShape[3] > 0 ? inputShape[3] : 3;
   const outputSize = net.outputs[0].shape?.at(-1);
 
-  let labels = await readLabels(files);
   if (outputSize > 0 && labels.length !== outputSize) {
     if (labels.length) log(`Label count (${labels.length}) does not match model outputs (${outputSize}); using generic names for extras.`, "warn");
     labels = Array.from({length: outputSize}, (_, i) => labels[i] ?? `Class ${i + 1}`);
   }
-  const normalization = $("normalization").value;
 
   function preprocess(video) {
     return tf.tidy(() => {
@@ -152,10 +172,9 @@ async function loadModelFiles() {
   // Warm up once so the first real frame is not slow.
   tf.tidy(() => { net.predict(tf.zeros([1, height, width, channels])); });
 
-  return { predict, getTotalClasses: () => labels.length, dispose: () => net.dispose(),
-           source: `local:${modelJsonFile.name}`,
-           description: `${isGraph ? "Graph" : "Layers"} model from ${modelJsonFile.name}: ` +
-                        `input ${width}×${height}×${channels}, ${labels.length} classes, ${normalization} normalisation` };
+  return { predict, getTotalClasses: () => labels.length, dispose: () => net.dispose(), source,
+           description: `${name}: input ${width}×${height}×${channels}, ${labels.length} classes ` +
+                        `(${labels.join(", ")}), ${normalization} normalisation` };
 }
 
 async function loadModel() {
@@ -164,7 +183,8 @@ async function loadModel() {
   const source = $("modelSource").value;
   setText("modelStatus", "Loading…");
   try {
-    const loaded = source === "files" ? await loadModelFiles() : await loadTeachableMachineUrl();
+    const loaders = { default: loadDefaultModel, files: loadModelFiles, url: loadTeachableMachineUrl };
+    const loaded = await (loaders[source] ?? loadDefaultModel)();
     if (model) model.dispose?.();
     model = loaded;
   } catch (error) {
@@ -183,9 +203,10 @@ async function loadModelButton() {
 }
 
 function updateModelSourceUi() {
-  const files = $("modelSource").value === "files";
-  $("urlSourceFields").hidden = files;
-  $("fileSourceFields").hidden = !files;
+  const source = $("modelSource").value;
+  $("defaultSourceFields").hidden = source !== "default";
+  $("urlSourceFields").hidden = source !== "url";
+  $("fileSourceFields").hidden = source !== "files";
 }
 
 function showSelectedFiles() {

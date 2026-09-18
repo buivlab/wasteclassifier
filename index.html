@@ -54,11 +54,16 @@
       <h2>Classifier configuration</h2>
       <label>Model source
         <select id="modelSource">
+          <option value="default" selected>Default waste model (bundled, lightweight)</option>
           <option value="url">Teachable Machine URL (online)</option>
           <option value="files">Upload model files (runs locally)</option>
         </select>
       </label>
-      <div id="urlSourceFields" class="source-fields">
+      <div id="defaultSourceFields" class="source-fields">
+        <p class="help">MobileNetV2 (0.5 width, 160×160) trained on the TrashNet dataset: cardboard, glass, metal, paper,
+          plastic, trash. About 1.4&nbsp;MB, designed for older tablets. Works best with one item on a plain background.</p>
+      </div>
+      <div id="urlSourceFields" class="source-fields" hidden>
         <label>Teachable Machine model URL
           <input id="modelUrl" inputmode="url" placeholder="https://teachablemachine.withgoogle.com/models/MODEL_ID/">
         </label>
