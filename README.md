@@ -35,7 +35,7 @@ Cups go to red because takeaway cups are plastic-lined and mugs are ceramic; dri
 
 The detector's weights were stored as float16 with `tools/quantize_tfjs_fp16.py`, halving the download from 18 MB. Its boxes and scores match the original float32 model to within 0.003.
 
-## Use your own Teachable Machine model
+## Train and use your own model
 
 The app has three pipelines (*Pipeline* under *Classifier configuration*):
 
