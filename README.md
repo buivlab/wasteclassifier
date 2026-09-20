@@ -31,9 +31,7 @@ Cups go to red because takeaway cups are plastic-lined and mugs are ceramic; dri
 
 **Councils differ.** Edit the defaults in `bins.js`, or open *Bin mapping* in the app and change any object's bin. In-app changes are saved on the device and highlighted; *Reset to defaults* restores `bins.js`. Deciding and justifying these rules for your council is a good student exercise.
 
-**Why not a material classifier?** An earlier version cropped the detected object and asked a waste-material classifier (EcoVision) for its material. The classifier can only answer one of its 10 materials, so for anything else it guesses. In testing, COCO correctly found a `cup` (95%), which the classifier then called `paper` (48%, yellow bin: wrong). COCO's own label is more reliable for deciding the bin. The material-classifier pipelines are still available under *Pipeline* for comparison, and the classifier model is only downloaded when one of them is selected.
-
-**Limitation to discuss with students:** COCO-SSD only knows 80 everyday object classes. It has no class for cans, boxes, crumpled paper or batteries, so these give **No item**. Setting *When nothing is detected* to **Classify the centre region instead** sends those frames to the material classifier; the message then records `"pipeline": "fallback"`.
+**Limitation:** COCO-SSD only knows 80 everyday object classes. It has no class for cans, boxes, crumpled paper or batteries, so these give **No item**. Setting *When nothing is detected* to **Classify the centre region instead** sends those frames to the material classifier; the message then records `"pipeline": "fallback"`.
 
 The detector's weights were stored as float16 with `tools/quantize_tfjs_fp16.py`, halving the download from 18 MB. Its boxes and scores match the original float32 model to within 0.003.
 
