@@ -1,6 +1,7 @@
-# Week 4 Android tablet waste sorter: which bin?
+# PROG6002 - Programming the Internet of Things 
+## Week 4 Smart Waste Terminal
 
-This is a no-build browser application for demonstrating on-device object detection and MQTT publication on an old Android tablet. It shows which kerbside bin an item belongs in: 🔴 red (general waste), 🟡 yellow (recycling) or 🟢 green (food & garden organics). Everything runs in the browser with TensorFlow.js. The app publishes the label, bin, confidence and timing metadata; it does not publish camera images.
+This is an initiative to turn old smart phones and tablet into a smart waste terminal through a no-build browser application. It uses on-device object detection to classify rubbish. It shows which kerbside bin an item belongs in: 🔴 red (general waste), 🟡 yellow (recycling) or 🟢 green (food & garden organics). Everything runs in the browser with TensorFlow.js. The app then publishes the label, bin, confidence and timing metadata  via MQTT to control the attached phisical smart bin; it does not publish camera images.
 
 ## What students learn
 
@@ -30,50 +31,11 @@ Cups go to red because takeaway cups are plastic-lined and mugs are ceramic; dri
 
 **Councils differ.** Edit the defaults in `bins.js`, or open *Bin mapping* in the app and change any object's bin. In-app changes are saved on the device and highlighted; *Reset to defaults* restores `bins.js`. Deciding and justifying these rules for your council is a good student exercise.
 
-**Why not a material classifier?** An earlier version cropped the detected object and asked a waste-material classifier (EcoVision) for its material. The classifier can only answer one of its 10 materials, so for anything else it guesses. In testing, COCO correctly found a `cup` (95%), which the classifier then called `paper` (48%, yellow bin: wrong). COCO's own label is more reliable for deciding the bin. The material-classifier pipelines are still available under *Pipeline* for comparison, and the classifier model is only downloaded when one of them is selected.
-
-**Limitation to discuss with students:** COCO-SSD only knows 80 everyday object classes. It has no class for cans, boxes, crumpled paper or batteries, so these give **No item**. Setting *When nothing is detected* to **Classify the centre region instead** sends those frames to the material classifier; the message then records `"pipeline": "fallback"`.
+**Limitation:** COCO-SSD only knows 80 everyday object classes. It has no class for cans, boxes, crumpled paper or batteries, so these give **No item**. Setting *When nothing is detected* to **Classify the centre region instead** sends those frames to the material classifier; the message then records `"pipeline": "fallback"`.
 
 The detector's weights were stored as float16 with `tools/quantize_tfjs_fp16.py`, halving the download from 18 MB. Its boxes and scores match the original float32 model to within 0.003.
 
-## Bundled material classifiers (optional pipelines)
-
-These are used only by the *detect then classify material* and *classify a fixed region* pipelines, or by the centre-region fallback. Choose one under *Material classifier*.
-
-| | **Default: EcoVision MobileNetV3** | **Lite: TrashNet MobileNetV2** |
-|---|---|---|
-| Folder | `models/ecovision-mobilenetv3/` | `models/waste-mobilenetv2/` |
-| Architecture | MobileNetV3-Large, 224 × 224 input | MobileNetV2 width 0.5, 160 × 160 input |
-| Size | 4.2M parameters, 8.4 MB download | 714k parameters, 1.4 MB download |
-| Compute per frame | ≈ 220M multiply-adds | ≈ 50M multiply-adds (about 5× less) |
-| Classes | `battery`, `biological`, `cardboard`, `clothes`, `glass`, `metal`, `paper`, `plastic`, `shoes`, `trash` | `cardboard`, `glass`, `metal`, `paper`, `plastic`, `trash` |
-| Training data | ≈ 20,000 varied photos ([Garbage Classification V2](https://www.kaggle.com/datasets/sumn2u/garbage-classification-v2)) | 2,527 photos on a white background ([TrashNet](https://huggingface.co/datasets/garythung/trashnet)) |
-| Reported accuracy | ≈ 95% (author's test set) | 86% (held-out test set) |
-| Source and licence | [AmadFR/ecovision_mobilenetv3](https://huggingface.co/AmadFR/ecovision_mobilenetv3), MIT | Trained for this unit, `tools/train_waste_model.py` |
-
-**EcoVision (the default)** was published as a PyTorch model. `tools/convert_ecovision.py` converts it: PyTorch → ONNX → TensorFlow (onnx2tf) → TF.js graph model with float16 weights. The ImageNet normalisation and softmax are built into the graph. On the author's example images, the converted TF.js model gave the same top class as the original PyTorch model every time, with probabilities within 0.006.
-
-**Lite** is only for tablets too slow to run EcoVision. It was trained on photos of single items on a white background, so in real camera scenes it over-predicts `cardboard` and `paper`.
-
-Limitations to discuss with students:
-
-- Neither classifier has an `unknown`/`empty` class. With detection on, an empty scene gives *No item*. With detection off or in fallback mode, an empty scene is still forced into a waste class, usually `cardboard`.
-- EcoVision's reported 95% comes from Kaggle datasets that overlap. Expect lower accuracy on your own tablet camera, lighting and backgrounds; measuring this is a good tutorial exercise.
-- The classes describe materials, not local bins. Map them to your council's bin categories in the MQTT consumer, or train a Teachable Machine model on your own items and bins.
-- Check the **Inference** time on your tablet. If EcoVision is too slow, raise the stable-frame count or switch to Lite.
-
-## Troubleshooting: "everything is cardboard or paper"
-
-This applies to the material-classifier pipelines only; the default COCO → bin pipeline does not use a classifier. With detection off or in fallback mode, both bundled classifiers answer `cardboard` or `paper` when they see little except background. This happens with a black, grey or white frame, a plain wall or table, or random noise. If every item gets these labels, the model is not seeing the item. Work through the panel **What the model sees & diagnostics**:
-
-1. **Check the preview thumbnail.** It shows exactly what the model receives. If it is black or blank, the camera frames are not reaching the model. *Brightness* and *Contrast* are shown under it; contrast below about 8 means a blank frame, and the log warns about this.
-2. **Fill the dashed box with the item.** Only the area inside the box is classified. In testing, a bottle occupying about a third of the frame on a plain table was classified as `paper` (whole frame or centre square) but as `plastic` at 99.9% with *zoom 2×*.
-3. **Run the model self-test.** It runs the detector and classifier on reference photos and compares the results with known-good values. If it fails, the phone's GPU is computing wrong results: choose **WebAssembly** under *Compute backend* and test again.
-4. **Classify a photo.** Take a photo with the phone's camera app and select it. If photos work but live video does not, the problem is in the camera stream rather than the model.
-
-The *Backend* row in *System state* shows the compute backend, GPU name and whether the GPU supports 32-bit or only 16-bit floats.
-
-## Use your own Teachable Machine model
+## Train and use your own model
 
 The app has three pipelines (*Pipeline* under *Classifier configuration*):
 
@@ -92,7 +54,7 @@ To use Teachable Machine:
 
 Model URLs must use `https://` (or `http://localhost` for local testing).
 
-## Run it on an Android tablet
+## Run it on a mobilephone or tablet
 
 The page must be served over HTTPS for camera access. Opening `index.html` directly from Downloads is not reliable.
 
@@ -147,7 +109,7 @@ The result is published only when:
 
 This reduces flicker and unnecessary MQTT traffic. Students should benchmark thresholds and stable-frame counts against accuracy, latency and message volume rather than copying the defaults without evidence.
 
-## Important Android notes
+## Important notes
 
 - Camera access normally requires HTTPS and user permission.
 - The app requests 640 x 480 and limits inference to approximately four runs per second to reduce load. Detection plus classification is roughly twice the work of classification alone; check the *Inference* time on your tablet.
@@ -182,4 +144,3 @@ This is a teaching prototype. A production system needs a private authenticated 
 - TensorFlow.js: https://www.tensorflow.org/js
 - MQTT.js browser client: https://github.com/mqttjs/MQTT.js
 - HiveMQ WebSocket client: https://www.hivemq.com/demos/websocket-client/
-
