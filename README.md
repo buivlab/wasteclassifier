@@ -1,6 +1,7 @@
-# Week 4 Android tablet waste sorter: which bin?
+# PROG6002 - Programming the Internet of Things 
+## Week 4 Smart Waste Terminal
 
-This is a no-build browser application for demonstrating on-device object detection and MQTT publication on an old Android tablet. It shows which kerbside bin an item belongs in: 🔴 red (general waste), 🟡 yellow (recycling) or 🟢 green (food & garden organics). Everything runs in the browser with TensorFlow.js. The app publishes the label, bin, confidence and timing metadata; it does not publish camera images.
+This is an initiative to turn old smart phones and tablet into a smart waste terminal through a no-build browser application. It uses on-device object detection to classify rubbish. It shows which kerbside bin an item belongs in: 🔴 red (general waste), 🟡 yellow (recycling) or 🟢 green (food & garden organics). Everything runs in the browser with TensorFlow.js. The app then publishes the label, bin, confidence and timing metadata  via MQTT to control the attached phisical smart bin; it does not publish camera images.
 
 ## What students learn
 
