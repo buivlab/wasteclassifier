@@ -88,7 +88,9 @@ Buttons show whether they can be used: clickable buttons are solid and raised; u
   "detected_object": {"label": "bottle", "confidence": 0.8942, "bbox": [0.1623, 0.1303, 0.7769, 0.5803]},
   "inference_ms": 96,
   "model": "coco-ssd-lite",
-  "alternatives": [{"label": "cup", "confidence": 0.61, "bin": "red"}]
+  "alternatives": [{"label": "cup", "confidence": 0.61, "bin": "red"}],
+  "location": {"latitude": -28.8154, "longitude": 153.2888, "accuracy_m": 12, "altitude_m": null,
+               "timestamp": "2026-09-19T03:20:08.100Z", "age_s": 2}
 }
 ```
 
@@ -97,7 +99,18 @@ Buttons show whether they can be used: clickable buttons are solid and raised; u
 - `classification` is the label that decided the bin: the COCO object in `coco` mode, otherwise the classifier's material.
 - `detected_object` is `null` unless an object was detected. `bbox` is `[x, y, width, height]` as fractions (0–1) of the camera frame.
 - `alternatives` lists other detected objects (or runner-up classes) with their bins.
+- `location` is `null` unless *Include GPS location* is ticked and a fix is available. `accuracy_m` combines the device's reported accuracy with the error added by rounding, `age_s` is how old the fix is, and `altitude_m` is `null` on most devices.
 - Schema version 2 added `bin`, `bin_description` and `model` (which replaced `model_url`).
+
+## Location (optional)
+
+Tick **Include GPS location in messages** in the MQTT panel to add a `location` object to each message. The browser asks for permission once, and the page must be served over HTTPS.
+
+- **Precision** sets how much the coordinates are rounded: ≈1 m (5 decimal places), ≈10 m (4), ≈100 m (3) or ≈1 km (2). Use the coarsest setting that still meets the need. Rounding is included in `accuracy_m`, so a ≈1 km setting reports about ±557 m even when the device's own fix is ±12 m.
+- Tablets without GPS fall back to Wi-Fi or mobile positioning, which can be off by tens or hundreds of metres. Check `accuracy_m` before drawing conclusions from a location.
+- With no fix yet, permission denied, or the box unticked, messages carry `"location": null`, so the format does not change.
+- The *Location* row in *System state* shows the current fix or why there is none. Denying permission unticks the box.
+- Privacy: location is personal information when it can be linked to a person. For a fixed bin terminal the position is a property of the bin, not of a person; for a hand-held tablet it tracks whoever carries it. Publish it only with a documented need and consent, and prefer coarse precision. This is a good discussion point for the unit's privacy content.
 
 ## Stability mechanism
 
@@ -117,6 +130,7 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 - Older tablets may terminate the tab when memory is low. Close other tabs and lower camera resolution or inference frequency if needed.
 - Keep the screen awake during demonstrations; browser background tabs are throttled.
 - Internet access is needed for the CDN libraries, the Teachable Machine model (if used) and the public broker. The bundled models are served with the app. For offline deployment, download and serve dependencies and model files locally.
+- Location needs HTTPS and user permission, and drains battery while the camera runs; leave it off unless the data is needed.
 - Browser-stored MQTT credentials are visible to the device user. Use a restricted teaching account and topic permissions.
 
 ## Suggested tutorial tests
@@ -133,6 +147,8 @@ This reduces flicker and unnecessary MQTT traffic. Students should benchmark thr
 | Rapid class changes | Consecutive-frame rule suppresses flicker |
 | Network disconnection | MQTT state changes and reconnects after restoration |
 | Old tablet benchmark | Median inference time and approximate messages/minute |
+| Location on/off | `location` is an object when ticked with a fix, `null` when unticked or denied |
+| Location precision | Coarser settings round the coordinates and raise `accuracy_m` |
 
 ## Production limitations
 

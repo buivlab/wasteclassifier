@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const fields = ["pipeline","detScore","fallback","modelSource","modelUrl","normalization","backend","region","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername"];
+const fields = ["pipeline","detScore","fallback","modelSource","modelUrl","normalization","backend","region","deviceId","mqttTopic","subscribeTopic","brokerUrl","threshold","stableFrames","cooldown","mqttUsername","locationPrecision"];
 const STORAGE_KEY = "prog6002-classifier", LOG_VISIBLE_KEY = "prog6002-log-visible", SETTINGS_VERSION = 2;
 const PASSWORD_KEY = "prog6002-mqtt-password";   // only written when "Remember password" is ticked
 let model = null, stream = null, running = false, mqttClient = null, subscribedTopic = "";
@@ -85,6 +85,7 @@ function loadSettings() {
     // Settings saved before version 2 predate the COCO → bin pipeline; keep everything except the old pipeline choice.
     if (saved.settingsVersion !== SETTINGS_VERSION) { delete saved.pipeline; delete saved.fallback; }
     fields.forEach(id => { if (saved[id] !== undefined) $(id).value = saved[id]; });
+    if (saved.includeLocation) { $("includeLocation").checked = true; startLocation(); }
   } catch (error) { log(`Saved configuration ignored: ${error.message}`, "error"); }
   try {
     const password = localStorage.getItem(PASSWORD_KEY);
@@ -97,7 +98,8 @@ function loadSettings() {
 
 function saveSettings() {
   try {
-    const data = { settingsVersion: SETTINGS_VERSION, ...Object.fromEntries(fields.map(id => [id, $(id).value])) };
+    const data = { settingsVersion: SETTINGS_VERSION, includeLocation: $("includeLocation").checked,
+                   ...Object.fromEntries(fields.map(id => [id, $(id).value])) };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     const remember = $("rememberPassword").checked;
     if (remember) localStorage.setItem(PASSWORD_KEY, $("mqttPassword").value);
@@ -114,6 +116,56 @@ function rememberPasswordChanged() {
   }
   try { localStorage.removeItem(PASSWORD_KEY); } catch {}
   log("Stored MQTT password removed from this device.");
+}
+
+// ---------- Location (opt-in) ----------
+// The browser's geolocation (GPS, or Wi-Fi/cell positioning on devices without GPS) is watched while the box
+// is ticked. Messages carry the latest fix, rounded to the chosen precision, or "location": null.
+let locationWatch = null, lastFix = null, lastLocationProblem = "";
+
+function locationChanged() {
+  if ($("includeLocation").checked) startLocation(); else { stopLocation(); log("Location switched off; messages will have \"location\": null."); }
+}
+
+function startLocation() {
+  if (!("geolocation" in navigator)) { setText("locationStatus", "Not available on this device"); log("Location is not available on this device.", "warn"); return; }
+  if (!window.isSecureContext) { setText("locationStatus", "Needs HTTPS"); log("Location needs the page to be served over HTTPS.", "warn"); return; }
+  if (locationWatch !== null) return;
+  setText("locationStatus", "Waiting for location…");
+  lastLocationProblem = "";
+  locationWatch = navigator.geolocation.watchPosition(position => {
+    if (!lastFix) log(`Location available (accuracy ±${Math.round(position.coords.accuracy)} m).`);
+    lastFix = position; lastLocationProblem = "";
+    const loc = locationPayload();
+    setText("locationStatus", `${loc.latitude}, ${loc.longitude} (±${loc.accuracy_m} m)`);
+  }, error => {
+    const problem = { 1: "permission denied", 2: "position unavailable", 3: "timed out" }[error.code] ?? error.message;
+    setText("locationStatus", lastFix ? `Last fix kept (${problem})` : `Unavailable (${problem})`);
+    if (problem !== lastLocationProblem) log(`Location ${problem}.${lastFix ? " Using the last fix." : " Messages will have \"location\": null."}`, "warn");
+    lastLocationProblem = problem;
+    if (error.code === 1) { stopLocation(); $("includeLocation").checked = false; setText("locationStatus", "Permission denied"); }
+  }, { enableHighAccuracy: true, maximumAge: 30000, timeout: 30000 });
+}
+
+function stopLocation() {
+  if (locationWatch !== null) navigator.geolocation.clearWatch(locationWatch);
+  locationWatch = null; lastFix = null;
+  setText("locationStatus", "Off");
+}
+
+// Latest fix for the MQTT message, rounded to the chosen number of decimal places; null if off or no fix yet.
+function locationPayload() {
+  if (!$("includeLocation").checked || !lastFix) return null;
+  const decimals = Number($("locationPrecision").value), c = lastFix.coords;
+  const round = v => Number(v.toFixed(decimals));
+  const roundingError = 111320 * 10 ** -decimals / 2;          // metres lost by rounding latitude
+  return {
+    latitude: round(c.latitude), longitude: round(c.longitude),
+    accuracy_m: Math.round(Math.max(c.accuracy, roundingError)),
+    altitude_m: c.altitude == null ? null : Math.round(c.altitude),
+    timestamp: new Date(lastFix.timestamp).toISOString(),
+    age_s: Math.round((Date.now() - lastFix.timestamp) / 1000)
+  };
 }
 
 // ---------- Model URL ----------
@@ -804,7 +856,8 @@ function buildPayload(result, inferenceMs, source="camera", frame=null) {
       bbox: [d.bbox[0]/fw, d.bbox[1]/fh, d.bbox[2]/fw, d.bbox[3]/fh].map(round) } : null,
     inference_ms:Math.round(inferenceMs),
     model: frame?.mode === "coco" ? "coco-ssd-lite" : (model?.source ?? null),
-    alternatives:result.alternatives.slice(0,2).map(p=>({label:p.label, confidence:round(p.confidence), bin:p.bin ?? null}))
+    alternatives:result.alternatives.slice(0,2).map(p=>({label:p.label, confidence:round(p.confidence), bin:p.bin ?? null})),
+    location: locationPayload()
   };
 }
 
@@ -1013,6 +1066,8 @@ $("mqttButton").addEventListener("click",connectMqtt);
 $("saveButton").addEventListener("click",saveSettings);
 $("tabletToggle").addEventListener("click",()=>setTabletMode(!document.body.classList.contains("tablet-mode")));
 $("rememberPassword").addEventListener("change",rememberPasswordChanged);
+$("includeLocation").addEventListener("change",locationChanged);
+$("locationPrecision").addEventListener("change",()=>{ if (lastFix) { const l = locationPayload(); setText("locationStatus", `${l.latitude}, ${l.longitude} (±${l.accuracy_m} m)`); } });
 $("testButton").addEventListener("click",publishTest);
 $("subscribeButton").addEventListener("click",toggleSubscribe);
 $("clearReceivedButton").addEventListener("click",clearReceived);

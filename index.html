@@ -184,6 +184,20 @@
         <label>Publish topic <input id="mqttTopic" value="prog6002/2026/team01-tablet01/classification"></label>
       </div>
       <p class="help"><code>wss://</code> is added automatically if the URL has no scheme.</p>
+      <div class="location-fields">
+        <label class="inline"><input id="includeLocation" type="checkbox"> Include GPS location in messages</label>
+        <label>Location precision
+          <select id="locationPrecision">
+            <option value="5">Precise (≈1 m)</option>
+            <option value="4" selected>≈10 m</option>
+            <option value="3">≈100 m</option>
+            <option value="2">≈1 km</option>
+          </select>
+        </label>
+        <p class="help">The browser asks for permission the first time. Tablets without GPS may use Wi-Fi positioning, which is
+          less accurate. With no fix yet (or switched off) messages contain <code>"location": null</code>. Only publish
+          location when there is a documented need, and use the coarsest precision that meets it.</p>
+      </div>
       <details>
         <summary>Optional broker credentials</summary>
         <div class="grid two">
@@ -234,6 +248,7 @@
           <div><dt>Detected object</dt><dd id="detectedStatus">—</dd></div>
           <div><dt>Camera</dt><dd id="cameraStatus">Stopped</dd></div>
           <div><dt>MQTT</dt><dd id="mqttStatus">Disconnected</dd></div>
+          <div><dt>Location</dt><dd id="locationStatus">Off</dd></div>
           <div><dt>Subscribed</dt><dd id="subscribedStatus">—</dd></div>
           <div><dt>Published</dt><dd id="publishedCount">0</dd></div>
           <div><dt>Inference</dt><dd id="inferenceTime">—</dd></div>
@@ -246,7 +261,7 @@
     </section>
   </main>
 
-  <footer>Classification runs locally in the browser. Images are not sent through MQTT by this sample.</footer>
+  <footer>CopyRight (C) by Vinh Bui (vinh.bui@scu.edu.au)<br>Classification runs locally in the browser. Images are not sent through MQTT by this sample.</footer>
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/tf-backend-wasm.min.js"></script>
