@@ -1,0 +1,174 @@
+<!doctype html>
+<!--
+  SCU Smart Waste Dashboard: STARTER PROTOTYPE for PROG6002 students.
+
+  How the pieces fit together
+  ---------------------------
+    index.html + app.js     the tablet "terminal": classifies rubbish and PUBLISHES MQTT messages
+    dashboard.html + .js    this page: SUBSCRIBES to those messages and displays them
+    bins.js                 shared list of bins (names, colours) used by both pages
+
+  This file is only the page STRUCTURE (the boxes). Look for the numbered "SECTION" comments below; every
+  box has an id that dashboard.js fills in. To add a widget: (1) add a <section> here, (2) write a render
+  function in dashboard.js, (3) call it from renderAll().
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SCU Smart Waste Dashboard</title>
+
+  <!-- Leaflet: a small open-source map library. Tiles come from OpenStreetMap. Docs: https://leafletjs.com -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+
+  <style>
+    /* ---- Theme: change these colours to restyle the whole page ---- */
+    :root {
+      --bg:#f2f5f7; --card:#ffffff; --ink:#163247; --muted:#5b6f7e; --line:#dce6eb; --brand:#123047;
+      --ok:#12a150; --warn:#e8a200; --bad:#d92d20; --off:#98a2b3;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+    header { background:var(--brand); color:#fff; padding:12px 20px; display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+    header h1 { margin:0; font-size:20px; }
+    .eyebrow { display:block; font-size:11px; letter-spacing:.1em; opacity:.7; }
+    main { padding:16px 20px 32px; display:grid; gap:16px; max-width:1300px; margin:0 auto; }
+    .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+    .panel h2 { margin:0 0 10px; font-size:16px; }
+    .grid { display:grid; gap:16px; }
+    .cols-2 { grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+    .cols-4 { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+    .cols-kpi { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+    label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--muted); }
+    input, select, button { font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); }
+    button { cursor:pointer; } button:hover { background:#eef3f6; }
+    button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+    .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; }
+    .toolbar .grow { flex:1 1 240px; }
+    .pill { padding:4px 12px; border-radius:99px; font-size:13px; font-weight:600; background:var(--off); color:#fff; }
+    .pill.ok { background:var(--ok); } .pill.warn { background:var(--warn); } .pill.bad { background:var(--bad); }
+    .help { color:var(--muted); font-size:12px; margin:6px 0 0; }
+    code { background:#eef3f6; padding:1px 4px; border-radius:4px; font-size:12px; }
+
+    /* KPI tiles */
+    .kpi { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+    .kpi span { font-size:12px; color:var(--muted); }
+    .kpi strong { display:block; font-size:26px; line-height:1.2; }
+
+    /* Bin cards (SECTION 3). The coloured stripe uses the colour from bins.js. */
+    .bin-card { background:var(--card); border:1px solid var(--line); border-top:8px solid var(--line); border-radius:10px; padding:12px 14px; }
+    .bin-card h3 { margin:0; font-size:15px; }
+    .bin-card .sub { font-size:12px; color:var(--muted); min-height:32px; }
+    .gauge { height:14px; background:#e6edf1; border-radius:7px; overflow:hidden; margin:8px 0 4px; }
+    .gauge > div { height:100%; width:0; transition:width .4s, background .4s; }
+    .bin-card .row { display:flex; justify-content:space-between; font-size:13px; }
+    .state { font-weight:700; }
+    .state.ok { color:var(--ok); } .state.warn { color:#a87500; } .state.bad { color:var(--bad); }
+
+    #map { height:380px; border-radius:8px; border:1px solid var(--line); }
+    .note-empty { color:var(--muted); font-style:italic; }
+
+    /* Simple bar rows used for "top items" and per-bin counts */
+    .barrow { display:grid; grid-template-columns:110px 1fr 40px; gap:8px; align-items:center; margin:4px 0; font-size:13px; }
+    .bar { height:12px; background:#e6edf1; border-radius:6px; overflow:hidden; }
+    .bar > div { height:100%; background:var(--brand); }
+
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
+    th { color:var(--muted); font-weight:600; font-size:12px; }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; background:var(--off); }
+    .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+    .tablewrap { overflow-x:auto; }
+    #rawLog { max-height:220px; overflow:auto; margin:0; padding-left:18px; font:12px/1.4 ui-monospace,Consolas,monospace; }
+    footer { text-align:center; color:var(--muted); font-size:12px; padding:0 0 20px; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#0f1a22; --card:#182632; --ink:#e6eef3; --muted:#9db0bd; --line:#2a3d4b; --brand:#2b6d94; }
+      input, select, button { background:#20323f; }
+      button:hover { background:#28404f; } .gauge, .bar { background:#2a3d4b; } code { background:#20323f; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">PROG6002 · STARTER PROTOTYPE</span><h1>SCU Smart Waste Dashboard</h1></div>
+    <div id="mqttStatus" class="pill">Disconnected</div>
+  </header>
+
+  <main>
+    <!-- ============ SECTION 1: MQTT connection + controls ============
+         The broker URL and topic are the two things that must match what the tablet (index.html) uses.
+         "Simulate" feeds fake messages through the same code path so you can build the dashboard
+         without a tablet or bins. -->
+    <section class="panel">
+      <div class="toolbar">
+        <label class="grow">Broker WebSocket URL <input id="brokerUrl"></label>
+        <label class="grow">Subscribe topic(s), comma separated <input id="topicFilter"></label>
+        <button id="connectButton" class="primary">Connect</button>
+        <button id="simButton">Start simulator</button>
+        <button id="resetButton">Reset data</button>
+        <label>Show device
+          <select id="deviceSelect"><option value="">All devices</option></select>
+        </label>
+      </div>
+      <p class="help">Use the same topic as the tablet's <em>Publish topic</em>. <code>+</code> matches one topic level and
+        <code>#</code> matches everything below, e.g. <code>prog6002/2026/+/classification</code> listens to every team.
+        On a public broker anyone can publish to your topic, so treat all incoming data as untrusted.</p>
+    </section>
+
+    <!-- ============ SECTION 2: headline numbers (KPIs) ============ -->
+    <section class="grid cols-kpi" id="kpis"></section>
+
+    <!-- ============ SECTION 3: bin status and level of each bin ============ -->
+    <section class="grid cols-4" id="binCards"></section>
+
+    <!-- ============ SECTION 4: map + device list ============ -->
+    <section class="grid cols-2">
+      <article class="panel">
+        <h2>Bin locations</h2>
+        <div id="map"></div>
+        <p id="mapNote" class="help"></p>
+      </article>
+      <article class="panel">
+        <h2>Devices</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Device</th><th>Status</th><th>Last seen</th><th>Items</th><th>Fullest bin</th><th>Location</th></tr></thead>
+          <tbody id="deviceRows"></tbody>
+        </table></div>
+      </article>
+    </section>
+
+    <!-- ============ SECTION 5: statistics about rubbish collected ============ -->
+    <section class="grid cols-2">
+      <article class="panel"><h2>Items per bin</h2><div id="binCounts"></div></article>
+      <article class="panel"><h2>Most common items</h2><div id="topItems"></div></article>
+      <article class="panel">
+        <h2>Activity: items per minute (last <span id="timelineMinutes"></span> min)</h2>
+        <div id="timeline"></div>
+      </article>
+      <article class="panel">
+        <h2>Latest classifications</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Time</th><th>Device</th><th>Item</th><th>Bin</th><th>Conf.</th></tr></thead>
+          <tbody id="recentRows"></tbody>
+        </table></div>
+      </article>
+    </section>
+
+    <!-- ============ SECTION 6: raw messages, for debugging ============
+         When something does not display, look here first: is the message arriving, and does its JSON have the
+         fields dashboard.js expects? -->
+    <section class="panel">
+      <h2>Raw MQTT messages (debug)</h2>
+      <ol id="rawLog"></ol>
+    </section>
+  </main>
+
+  <footer>Prototype for teaching. Extend it: history charts, alerts, collection routes, saved data&hellip; See the TODO ideas in dashboard.js.</footer>
+
+  <!-- Scripts. Order matters: libraries first, then bins.js (defines BINS), then our code. -->
+  <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="bins.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>
